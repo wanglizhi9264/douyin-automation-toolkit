@@ -22,11 +22,39 @@ export async function chooseDownloadTarget({ preferBrowserDownloads = true } = {
 
 function downloadWithChromeDownloads(options) {
   return new Promise((resolve, reject) => {
-    chrome.downloads.download(options, (downloadId) => {
-      const error = chrome.runtime.lastError;
-      if (error) reject(new Error(error.message));
-      else resolve(downloadId);
-    });
+    if (globalThis.chrome?.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: "DOWNLOAD_URL", ...options }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(new Error(runtimeError.message));
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.error || "download failed"));
+          return;
+        }
+        resolve(response.downloadId);
+      });
+      return;
+    }
+
+    if (globalThis.chrome?.downloads?.download) {
+      chrome.downloads.download(options, (downloadId) => {
+        const error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message));
+        else resolve(downloadId);
+      });
+      return;
+    }
+
+    const anchor = document.createElement("a");
+    anchor.href = options.url;
+    anchor.download = options.filename.split("/").pop() || "download";
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    resolve(null);
   });
 }
 
