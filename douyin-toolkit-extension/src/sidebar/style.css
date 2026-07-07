@@ -36,7 +36,7 @@ input {
 }
 
 .header {
-  padding: 14px 14px 10px;
+  padding: 12px 12px 10px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
@@ -50,8 +50,9 @@ input {
 
 h1 {
   margin: 0;
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.2;
+  word-break: keep-all;
 }
 
 .status {
@@ -68,12 +69,12 @@ h1 {
 
 .content {
   overflow: auto;
-  padding: 12px;
+  padding: 10px;
 }
 
 .panel {
-  margin-bottom: 12px;
-  padding: 12px;
+  margin-bottom: 10px;
+  padding: 10px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -91,6 +92,7 @@ h1 {
 }
 
 .button {
+  flex: 1 1 calc(50% - 8px);
   min-height: 34px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -98,6 +100,7 @@ h1 {
   color: var(--text);
   background: #fff;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .button.primary {
@@ -113,7 +116,7 @@ h1 {
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(128px, 1fr));
   gap: 8px;
 }
 
@@ -182,4 +185,24 @@ h1 {
 
 .log div {
   white-space: pre-wrap;
+}
+
+@media (max-width: 360px) {
+  .title-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .status {
+    align-self: flex-start;
+  }
+
+  .button,
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .button {
+    flex-basis: 100%;
+  }
 }

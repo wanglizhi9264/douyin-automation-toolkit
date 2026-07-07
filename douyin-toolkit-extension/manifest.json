@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "抖音收藏与下载工具",
+  "name": "抖音收藏备份助手",
   "version": "0.1.0",
-  "description": "本地管理抖音喜欢列表收藏、审计与下载备份。",
+  "description": "本地管理抖音喜欢列表收藏、审计和视频备份。",
   "action": {
-    "default_title": "抖音收藏与下载工具"
+    "default_title": "抖音收藏备份助手"
   },
   "background": {
     "service_worker": "src/background.js",
