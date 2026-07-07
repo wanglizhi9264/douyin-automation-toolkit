@@ -1,0 +1,13 @@
+{
+  "count": 20,
+  "minDelayMs": 300,
+  "maxDelayMs": 900,
+  "retries": 3,
+  "retryBaseDelayMs": 1500,
+  "syncLikedBeforeRun": false,
+  "stopAfterNoNewPages": 5,
+  "cycleBatchSize": 100,
+  "cycleAuditRecent": 120,
+  "continueOnAuditFailure": true,
+  "maxConsecutiveAuditFailures": 6
+}

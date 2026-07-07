@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "抖音收藏与下载工具",
+  "version": "0.1.0",
+  "description": "本地管理抖音喜欢列表收藏、审计与下载备份。",
+  "action": {
+    "default_title": "抖音收藏与下载工具"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.douyin.com/*",
+    "https://*.douyin.com/*",
+    "https://*.douyinpic.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.douyin.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "css": [
+        "src/content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "https://www.douyin.com/*"
+      ],
+      "resources": [
+        "src/injected.js",
+        "src/content.css",
+        "src/sidebar/index.html",
+        "src/sidebar/app.js",
+        "src/sidebar/style.css",
+        "src/shared/db.js",
+        "src/shared/state.js",
+        "src/shared/api.js",
+        "src/shared/download.js",
+        "src/shared/events.js"
+      ]
+    }
+  ]
+}

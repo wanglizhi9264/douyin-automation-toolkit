@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+*.crx
+*.pem
+
+# Local browser/session data
+.douyin-playwright-profile/
+
+# Personal progress and downloaded media
+douyin-favorite-progress.json
+downloads/
+DouyinBackup/
+douyin-toolkit-extension/downloads/
+
+# Debug screenshots from exploration
+douyin-debug-*.png
+douyin-debug-*.json

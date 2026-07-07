@@ -1,0 +1,17 @@
+{
+  "name": "douyin-liked-favorite-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "douyin:login": "node scripts/douyin-favorite-liked.mjs login",
+    "douyin:probe": "node scripts/douyin-favorite-liked.mjs probe",
+    "douyin:run": "node scripts/douyin-favorite-liked.mjs run",
+    "douyin:audit": "node scripts/douyin-favorite-liked.mjs audit",
+    "douyin:cycle": "node scripts/douyin-favorite-liked.mjs cycle",
+    "douyin:dashboard": "node scripts/douyin-dashboard.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}
