@@ -375,9 +375,9 @@ async function runDownloadBatch() {
   stopRequested = false;
   updateButtons();
   try {
+    const rootHandle = await chooseDownloadDirectory();
     await saveCurrentConfig();
     const config = await loadConfig();
-    const rootHandle = await chooseDownloadDirectory();
     const items = (await getAll("items"))
       .filter((item) => SUCCESS_STATUSES.has(item.status) && item.downloadStatus !== "downloaded")
       .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0))
@@ -387,7 +387,9 @@ async function runDownloadBatch() {
       return;
     }
     $("runtimeStatus").textContent = "下载中";
-    logLine(`开始下载批次：${items.length} 条`);
+    logLine(rootHandle.kind === "downloads"
+      ? `开始下载批次：${items.length} 条，保存到浏览器下载目录`
+      : `开始下载批次：${items.length} 条`);
     let downloaded = 0;
     for (const item of items) {
       if (stopRequested) break;

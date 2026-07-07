@@ -12,7 +12,8 @@
   },
   "permissions": [
     "storage",
-    "tabs"
+    "tabs",
+    "downloads"
   ],
   "host_permissions": [
     "https://www.douyin.com/*",

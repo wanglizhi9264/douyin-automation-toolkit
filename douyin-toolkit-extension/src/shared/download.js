@@ -1,14 +1,51 @@
 export async function chooseDownloadDirectory() {
-  if (!("showDirectoryPicker" in window)) {
-    throw new Error("当前浏览器不支持目录写入，请使用 Chrome/Edge 新版本");
+  if ("showDirectoryPicker" in window) {
+    try {
+      return {
+        kind: "filesystem",
+        handle: await showDirectoryPicker({ mode: "readwrite" }),
+      };
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error("已取消选择下载目录");
+      if (!globalThis.chrome?.downloads?.download) {
+        throw new Error(`目录写入不可用：${error.message}`);
+      }
+    }
   }
-  return showDirectoryPicker({ mode: "readwrite" });
+  if (globalThis.chrome?.downloads?.download) return { kind: "downloads" };
+  throw new Error("当前浏览器不支持目录写入，也没有 downloads 权限");
 }
 
-export async function writeFile(rootHandle, relativePath, data) {
+function downloadWithChromeDownloads(options) {
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download(options, (downloadId) => {
+      const error = chrome.runtime.lastError;
+      if (error) reject(new Error(error.message));
+      else resolve(downloadId);
+    });
+  });
+}
+
+export async function writeFile(target, relativePath, data) {
+  if (target.kind === "downloads") {
+    const blob = data instanceof Blob ? data : new Blob([data]);
+    const url = URL.createObjectURL(blob);
+    try {
+      await downloadWithChromeDownloads({
+        url,
+        filename: relativePath,
+        conflictAction: "uniquify",
+        saveAs: false,
+      });
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    }
+    return;
+  }
+
   const parts = relativePath.split("/").filter(Boolean);
   const fileName = parts.pop();
-  let dir = rootHandle;
+  let dir = target.handle;
   for (const part of parts) {
     dir = await dir.getDirectoryHandle(part, { create: true });
   }
