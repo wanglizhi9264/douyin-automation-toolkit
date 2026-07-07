@@ -65,7 +65,18 @@ async function collectAweme(awemeId) {
 async function fetchAwemeDetail(awemeId) {
   const params = webParams();
   params.set("aweme_id", awemeId);
-  return fetchJson(`/aweme/v1/web/aweme/detail/?${params}`);
+  const result = await fetchJson(`/aweme/v1/web/aweme/detail/?${params}`);
+  const aweme = result.json?.aweme_detail || result.json?.aweme || result.json?.item || result.json?.data || null;
+  return {
+    ...result,
+    ok: result.ok && Boolean(aweme),
+    collectStat: aweme?.collect_stat ?? null,
+    desc: aweme?.desc ?? "",
+    authorName: aweme?.author?.nickname ?? "",
+    authorUid: aweme?.author?.uid ?? "",
+    coverUrl: aweme?.video?.cover?.url_list?.[0] || "",
+    aweme,
+  };
 }
 
 window.addEventListener("message", async (event) => {

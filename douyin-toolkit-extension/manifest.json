@@ -17,7 +17,13 @@
   "host_permissions": [
     "https://www.douyin.com/*",
     "https://*.douyin.com/*",
-    "https://*.douyinpic.com/*"
+    "https://*.douyinpic.com/*",
+    "https://*.douyinvod.com/*",
+    "https://*.douyinstatic.com/*",
+    "https://*.byteimg.com/*",
+    "https://*.bytecdntp.com/*",
+    "https://*.bytedance.com/*",
+    "https://*.snssdk.com/*"
   ],
   "content_scripts": [
     {
