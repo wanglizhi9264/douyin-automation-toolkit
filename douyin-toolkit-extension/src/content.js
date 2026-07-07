@@ -20,7 +20,6 @@ function ensureSidebar() {
   frame.id = SIDEBAR_ID;
   frame.src = chrome.runtime.getURL("src/sidebar/index.html");
   frame.setAttribute("title", "抖音收藏备份助手");
-  frame.setAttribute("allow", "file-system-access");
   document.documentElement.appendChild(frame);
 }
 
