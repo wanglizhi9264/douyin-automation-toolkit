@@ -2,7 +2,7 @@ import { sendPageRequest } from "../shared/events.js";
 import { addLog, getAll, putItems } from "../shared/db.js";
 import { DEFAULT_CONFIG, importProgress, loadConfig, saveConfig, summarize } from "../shared/state.js";
 import { pickVideoUrl } from "../shared/api.js";
-import { chooseDownloadDirectory, writeFile } from "../shared/download.js";
+import { chooseDownloadTarget, writeFile } from "../shared/download.js";
 
 const $ = (id) => document.getElementById(id);
 let configHydrated = false;
@@ -374,8 +374,9 @@ async function runDownloadBatch() {
   running = true;
   stopRequested = false;
   updateButtons();
+  $("runtimeStatus").textContent = "准备下载";
+  logLine("已点击开始下载，正在检查可下载项目");
   try {
-    const rootHandle = await chooseDownloadDirectory();
     await saveCurrentConfig();
     const config = await loadConfig();
     const items = (await getAll("items"))
@@ -383,9 +384,11 @@ async function runDownloadBatch() {
       .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0))
       .slice(0, Number(config.batchSize || DEFAULT_CONFIG.batchSize));
     if (!items.length) {
+      $("runtimeStatus").textContent = "空闲";
       logLine("没有待下载的已收藏项目");
       return;
     }
+    const rootHandle = await chooseDownloadTarget({ preferBrowserDownloads: true });
     $("runtimeStatus").textContent = "下载中";
     logLine(rootHandle.kind === "downloads"
       ? `开始下载批次：${items.length} 条，保存到浏览器下载目录`

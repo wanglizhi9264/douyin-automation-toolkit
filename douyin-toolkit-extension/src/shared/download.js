@@ -1,5 +1,9 @@
-export async function chooseDownloadDirectory() {
-  if ("showDirectoryPicker" in window) {
+export async function chooseDownloadTarget({ preferBrowserDownloads = true } = {}) {
+  if (preferBrowserDownloads && globalThis.chrome?.downloads?.download) {
+    return { kind: "downloads" };
+  }
+
+  if (globalThis.showDirectoryPicker) {
     try {
       return {
         kind: "filesystem",
