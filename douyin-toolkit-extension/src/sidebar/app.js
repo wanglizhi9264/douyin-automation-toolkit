@@ -2,7 +2,7 @@ import { sendPageRequest } from "../shared/events.js";
 import { addLog, getAll, putItems } from "../shared/db.js";
 import { DEFAULT_CONFIG, importProgress, loadConfig, saveConfig, summarize } from "../shared/state.js";
 import { pickVideoUrl } from "../shared/api.js";
-import { chooseDownloadTarget, writeFile } from "../shared/download.js";
+import { chooseDownloadTarget, downloadUrl, writeFile } from "../shared/download.js";
 
 const $ = (id) => document.getElementById(id);
 let configHydrated = false;
@@ -308,19 +308,6 @@ function paddedIndex(item) {
   return String(Number(item.index ?? 0) + 1).padStart(6, "0");
 }
 
-async function fetchBlob(url, label) {
-  const response = await fetch(url, {
-    credentials: "include",
-    headers: {
-      "accept": "*/*",
-    },
-  });
-  if (!response.ok) throw new Error(`${label} HTTP ${response.status}`);
-  const blob = await response.blob();
-  if (!blob.size) throw new Error(`${label} 0 字节`);
-  return blob;
-}
-
 async function downloadOne(item, rootHandle, config) {
   await saveItem(patchItem(item, { downloadStatus: "downloading", lastError: "" }));
   let videoUrl = item.videoUrl || "";
@@ -335,12 +322,10 @@ async function downloadOne(item, rootHandle, config) {
   if (!videoUrl) throw new Error("未找到可下载视频地址");
 
   const base = `${paddedIndex(item)}-${item.awemeId}`;
-  const videoBlob = await fetchBlob(videoUrl, "视频");
-  await writeFile(rootHandle, `DouyinBackup/success/videos/${base}.mp4`, videoBlob);
+  await downloadUrl(rootHandle, `DouyinBackup/success/videos/${base}.mp4`, videoUrl);
 
   if (config.downloadCovers && coverUrl) {
-    const coverBlob = await fetchBlob(coverUrl, "封面");
-    await writeFile(rootHandle, `DouyinBackup/success/covers/${base}.jpg`, coverBlob);
+    await downloadUrl(rootHandle, `DouyinBackup/success/covers/${base}.jpg`, coverUrl);
   }
 
   const manifest = {
@@ -357,9 +342,7 @@ async function downloadOne(item, rootHandle, config) {
       cover: config.downloadCovers && coverUrl ? `success/covers/${base}.jpg` : null,
     },
   };
-  await writeFile(rootHandle, `DouyinBackup/success/manifests/${base}.json`, new Blob([
-    `${JSON.stringify(manifest, null, 2)}\n`,
-  ], { type: "application/json" }));
+  await writeFile(rootHandle, `DouyinBackup/success/manifests/${base}.json`, `${JSON.stringify(manifest, null, 2)}\n`);
 
   await saveItem(patchItem(item, {
     videoUrl,
@@ -380,7 +363,7 @@ async function runDownloadBatch() {
     await saveCurrentConfig();
     const config = await loadConfig();
     const items = (await getAll("items"))
-      .filter((item) => SUCCESS_STATUSES.has(item.status) && item.downloadStatus !== "downloaded")
+      .filter((item) => ["favorited", "already_favorited"].includes(item.status) && item.downloadStatus !== "downloaded")
       .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0))
       .slice(0, Number(config.batchSize || DEFAULT_CONFIG.batchSize));
     if (!items.length) {

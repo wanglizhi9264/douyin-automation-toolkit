@@ -61,7 +61,7 @@ function downloadWithChromeDownloads(options) {
 export async function writeFile(target, relativePath, data) {
   if (target.kind === "downloads") {
     const blob = data instanceof Blob ? data : new Blob([data]);
-    const url = URL.createObjectURL(blob);
+    const url = data instanceof Blob ? URL.createObjectURL(blob) : `data:application/json;charset=utf-8,${encodeURIComponent(String(data))}`;
     try {
       await downloadWithChromeDownloads({
         url,
@@ -85,4 +85,25 @@ export async function writeFile(target, relativePath, data) {
   const writable = await file.createWritable();
   await writable.write(data);
   await writable.close();
+}
+
+export async function downloadUrl(target, relativePath, url) {
+  if (target.kind === "downloads") {
+    await downloadWithChromeDownloads({
+      url,
+      filename: relativePath,
+      conflictAction: "uniquify",
+      saveAs: false,
+    });
+    return;
+  }
+
+  const response = await fetch(url, {
+    credentials: "include",
+    headers: { "accept": "*/*" },
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const blob = await response.blob();
+  if (!blob.size) throw new Error("0 字节");
+  await writeFile(target, relativePath, blob);
 }
