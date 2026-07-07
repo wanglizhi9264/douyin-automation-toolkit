@@ -30,19 +30,20 @@ function setSidebarVisible(visible) {
 }
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === "TOGGLE_SIDEBAR") {
+  if (message && message.type === "TOGGLE_SIDEBAR") {
     setSidebarVisible(!sidebarVisible);
   }
+  return false;
 });
 
 window.addEventListener("message", (event) => {
-  if (event.source === window && event.data?.source === "douyin-toolkit-page") {
+  if (event.source === window && event.data && event.data.source === "douyin-toolkit-page") {
     const frame = document.getElementById(SIDEBAR_ID);
-    frame?.contentWindow?.postMessage(event.data, EXTENSION_ORIGIN);
+    if (frame && frame.contentWindow) frame.contentWindow.postMessage(event.data, EXTENSION_ORIGIN);
     return;
   }
-  if (event.origin === EXTENSION_ORIGIN && event.data?.source === "douyin-toolkit-sidebar") {
-    window.postMessage({ ...event.data, source: "douyin-toolkit-content" }, "https://www.douyin.com");
+  if (event.origin === EXTENSION_ORIGIN && event.data && event.data.source === "douyin-toolkit-sidebar") {
+    window.postMessage({ ...event.data, source: "douyin-toolkit-content" }, location.origin);
   }
 });
 
