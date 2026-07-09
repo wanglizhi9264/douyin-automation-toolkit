@@ -32,6 +32,15 @@ export function pickVideoUrl(aweme, { preferBestQuality = false } = {}) {
   return valid.sort((a, b) => (b.width - a.width) || (b.bitrate - a.bitrate) || (b.size - a.size))[0];
 }
 
+export function describeVideoCandidate(candidate) {
+  if (!candidate) return "未知";
+  const codec = candidate.codec || "unknown";
+  const width = candidate.width ? `${candidate.width}w` : "0w";
+  const bitrate = candidate.bitrate ? `${Math.round(candidate.bitrate / 1000)}kbps` : "bitrate?";
+  const size = candidate.size ? `${(candidate.size / 1024 / 1024).toFixed(1)}MB` : "size?";
+  return `${codec} ${width} ${bitrate} ${size}`;
+}
+
 export function normalizeAweme(aweme, index = 0, source = "liked") {
   const awemeId = String(aweme?.aweme_id || aweme?.awemeId || aweme?.id || "");
   const videoCandidate = pickVideoUrl(aweme);

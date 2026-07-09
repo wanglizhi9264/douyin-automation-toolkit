@@ -10,6 +10,8 @@ export const DEFAULT_CONFIG = {
   maxConsecutiveAuditFailures: 6,
   downloadCovers: true,
   skipExistingDownloads: true,
+  downloadPreferBestQuality: true,
+  downloadUseSavedFolder: true,
 };
 
 const SUCCESS_STATUSES = new Set(["favorited", "already_favorited", "skipped_inaccessible"]);
@@ -64,20 +66,41 @@ export async function summarize() {
   ]);
   const counts = {};
   for (const item of items) counts[item.status || "unknown"] = (counts[item.status || "unknown"] || 0) + 1;
+  const favoriteApiItems = items.filter((item) => item.source === "liked" || item.source === "favorite_api");
   const success = items.filter((item) => SUCCESS_STATUSES.has(item.status)).length;
   const pending = items.filter((item) => item.status === "pending").length;
   const paused = items.filter((item) => String(item.status || "").startsWith("paused") || item.status === "blocked");
   const auditPending = items.filter((item) => item.status === "pending" && String(item.lastError || "").includes("审计发现未真正收藏"));
-  const cursor = [...items].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
+  const sortedByUpdate = [...items].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+  const cursor = sortedByUpdate[0] || null;
+  const favorite = {
+    total: favoriteApiItems.length,
+    completed: items.filter((item) => SUCCESS_STATUSES.has(item.status)).length,
+    pending: items.filter((item) => !SUCCESS_STATUSES.has(item.status) && item.status !== "blocked" && !String(item.status || "").startsWith("paused")).length,
+    paused: paused.length,
+    auditPending: auditPending.length,
+    cursor: cursor,
+  };
+  const download = {
+    eligible: items.filter((item) => ["favorited", "already_favorited"].includes(item.status)).length,
+    downloaded: items.filter((item) => item.downloadStatus === "downloaded").length,
+    pending: items.filter((item) => ["favorited", "already_favorited"].includes(item.status) && item.downloadStatus !== "downloaded").length,
+    failed: items.filter((item) => item.downloadStatus === "failed").length,
+    cursor: sortedByUpdate.find((item) => item.downloadStatus && item.downloadStatus !== "not_started") || null,
+  };
   return {
     config,
     counts,
     total: items.length,
+    likedTotal: favoriteApiItems.length,
+    likedSyncedTo: favoriteApiItems.length ? Math.max(...favoriteApiItems.map((item) => Number(item.index ?? -1))) : -1,
     success,
     pending,
     paused: paused.length,
     auditPending: auditPending.length,
     cursor,
+    favorite,
+    download,
     lastImport,
     logs,
   };

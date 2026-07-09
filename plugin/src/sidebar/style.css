@@ -48,11 +48,37 @@ input {
   gap: 12px;
 }
 
+.title-stack {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 h1 {
   margin: 0;
   font-size: 16px;
   line-height: 1.2;
   word-break: keep-all;
+}
+
+.close-button {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0;
+  color: var(--muted);
+  background: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.close-button:hover {
+  color: var(--text);
+  border-color: #b8b8bf;
 }
 
 .status {
@@ -80,15 +106,29 @@ h1 {
   border-radius: 8px;
 }
 
+.hero-panel {
+  background: linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
+}
+
 .panel h2 {
   margin: 0 0 10px;
   font-size: 14px;
+}
+
+.section-head {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 .buttons {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.buttons.compact .button {
+  flex: 1 1 0;
 }
 
 .button {
@@ -120,6 +160,10 @@ h1 {
   gap: 8px;
 }
 
+.compact-grid {
+  grid-template-columns: 1fr;
+}
+
 .stat {
   padding: 10px;
   background: var(--panel2);
@@ -136,6 +180,12 @@ h1 {
   margin-top: 6px;
   font-size: 22px;
   font-weight: 720;
+}
+
+.compact-value {
+  font-size: 15px;
+  line-height: 1.35;
+  font-weight: 650;
 }
 
 .field {
@@ -169,6 +219,30 @@ h1 {
 .log {
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.meta-block {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.meta-label {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.latest-log {
+  margin-bottom: 8px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f2f7ff;
+  border: 1px solid #cddff9;
+  color: #174ea6;
+  font-size: 12px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 

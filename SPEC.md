@@ -40,7 +40,7 @@
 建议目录：
 
 ```text
-douyin-toolkit-extension/
+plugin/
   manifest.json
   src/
     background.js
@@ -343,13 +343,13 @@ failed
 保留现有文件：
 
 ```text
-douyin-favorite-progress.json
-douyin-favorite.config.json
+backend/data/douyin-favorite-progress.json
+backend/config/douyin-favorite.config.json
 ```
 
 插件第一版提供「导入现有进度」按钮：
 
-1. 用户选择 `douyin-favorite-progress.json`。
+1. 用户选择 `backend/data/douyin-favorite-progress.json`。
 2. 插件读取 JSON。
 3. 转换为 IndexedDB items。
 4. 保留 `index`、`awemeId`、`status`、`collectStat`、`desc`、`author`、`lastError`。
@@ -398,7 +398,7 @@ DouyinBackup/
 已完成：
 
 - 初始化 Git 管理范围和忽略规则。
-- 建立 `douyin-toolkit-extension/` MV3 插件目录。
+- 建立 `plugin/` MV3 插件目录。
 - 实现抖音页面侧边栏注入。
 - 实现插件 iframe 与抖音页面上下文消息桥。
 - 实现当前网页登录态检测接口。

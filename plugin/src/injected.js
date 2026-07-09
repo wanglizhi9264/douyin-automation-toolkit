@@ -79,6 +79,45 @@ async function fetchAwemeDetail(awemeId) {
   };
 }
 
+async function writeToHandle(rootHandle, relativePath, data) {
+  const parts = String(relativePath || "").split("/").filter(Boolean);
+  const fileName = parts.pop();
+  let dir = rootHandle;
+  for (const part of parts) {
+    dir = await dir.getDirectoryHandle(part, { create: true });
+  }
+  const file = await dir.getFileHandle(fileName, { create: true });
+  const writable = await file.createWritable();
+  await writable.write(data);
+  await writable.close();
+}
+
+async function downloadToFolder(rootHandle, relativePath, url) {
+  let response;
+  try {
+    response = await fetch(url, {
+      credentials: "omit",
+      mode: "cors",
+      headers: {
+        "accept": "*/*",
+      },
+    });
+  } catch (error) {
+    throw new Error(`页面抓取失败：${error?.message || String(error)}`);
+  }
+  if (!response.ok) {
+    throw new Error(`页面抓取失败：HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  if (!blob.size) throw new Error("页面抓取失败：0 字节");
+  await writeToHandle(rootHandle, relativePath, blob);
+  return {
+    ok: true,
+    size: blob.size,
+    contentType: blob.type || "",
+  };
+}
+
 window.addEventListener("message", async (event) => {
   if (event.source !== window) return;
   const message = event.data;
@@ -95,6 +134,10 @@ window.addEventListener("message", async (event) => {
     }
     if (type === "FETCH_AWEME_DETAIL") {
       reply(requestId, type, await fetchAwemeDetail(payload.awemeId));
+      return;
+    }
+    if (type === "DOWNLOAD_TO_FOLDER") {
+      reply(requestId, type, await downloadToFolder(payload.rootHandle, payload.relativePath, payload.url));
       return;
     }
     reply(requestId, type, null, `Unknown request type: ${type}`);

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>选择下载文件夹</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f5f7;
+      --panel: #fff;
+      --text: #1d1d1f;
+      --muted: #6e6e73;
+      --line: #d8d8de;
+      --blue: #0071e3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    .card {
+      width: min(520px, 100%);
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+    }
+    h1 { margin: 0 0 8px; font-size: 20px; }
+    p { margin: 0 0 16px; color: var(--muted); }
+    button {
+      min-height: 40px;
+      border: 1px solid var(--blue);
+      border-radius: 999px;
+      padding: 0 16px;
+      color: #fff;
+      background: var(--blue);
+      font: inherit;
+      cursor: pointer;
+    }
+    #status { margin-top: 16px; color: var(--muted); white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>选择下载文件夹</h1>
+    <p>用于保存抖音备份视频。选择后会记住这次授权，后续下载默认继续写入这里。</p>
+    <button id="pickBtn" type="button">选择文件夹</button>
+    <div id="status">等待选择</div>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

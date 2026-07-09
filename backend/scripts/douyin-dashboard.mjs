@@ -7,8 +7,8 @@ import { spawn, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = process.cwd();
-const STATE_PATH = path.join(ROOT, "douyin-favorite-progress.json");
-const CONFIG_PATH = path.join(ROOT, "douyin-favorite.config.json");
+const STATE_PATH = path.join(ROOT, "data", "douyin-favorite-progress.json");
+const CONFIG_PATH = path.join(ROOT, "config", "douyin-favorite.config.json");
 const AUTOMATION_SCRIPT = path.join(ROOT, "scripts", "douyin-favorite-liked.mjs");
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.DOUYIN_DASHBOARD_PORT || 4777);

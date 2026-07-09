@@ -23,6 +23,12 @@ function ensureSidebar() {
   document.documentElement.appendChild(frame);
 }
 
+function removeSidebar() {
+  const frame = document.getElementById(SIDEBAR_ID);
+  if (frame) frame.remove();
+  sidebarVisible = false;
+}
+
 function setSidebarVisible(visible) {
   sidebarVisible = visible;
   const frame = document.getElementById(SIDEBAR_ID);
@@ -31,7 +37,15 @@ function setSidebarVisible(visible) {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message && message.type === "TOGGLE_SIDEBAR") {
-    setSidebarVisible(!sidebarVisible);
+    if (!document.getElementById(SIDEBAR_ID)) {
+      ensureSidebar();
+      setSidebarVisible(true);
+    } else {
+      setSidebarVisible(!sidebarVisible);
+    }
+  }
+  if (message && message.type === "CLOSE_SIDEBAR") {
+    removeSidebar();
   }
   return false;
 });
@@ -43,6 +57,10 @@ window.addEventListener("message", (event) => {
     return;
   }
   if (event.origin === EXTENSION_ORIGIN && event.data && event.data.source === "douyin-toolkit-sidebar") {
+    if (event.data.type === "CLOSE_SIDEBAR") {
+      removeSidebar();
+      return;
+    }
     window.postMessage({ ...event.data, source: "douyin-toolkit-content" }, location.origin);
   }
 });

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>抖音收藏备份助手</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <div class="title-row">
+        <div class="title-stack">
+          <h1>抖音收藏备份助手</h1>
+          <span id="runtimeStatus" class="status">加载中</span>
+        </div>
+        <button id="closeBtn" class="close-button" type="button" aria-label="关闭面板">×</button>
+      </div>
+      <div id="pageMeta" class="meta" style="margin-top:8px">等待抖音页面连接</div>
+    </header>
+    <section class="content">
+      <div class="panel hero-panel">
+        <h2>下载总览</h2>
+        <div class="grid">
+          <div class="stat"><div class="stat-label">总喜欢数</div><div id="likedSummaryCount" class="stat-value">0</div></div>
+          <div class="stat"><div class="stat-label">拉取到</div><div id="likedSummaryCursor" class="stat-value">-</div></div>
+          <div class="stat"><div class="stat-label">下载到</div><div id="downloadSummaryCursor" class="stat-value">-</div></div>
+          <div class="stat"><div class="stat-label">当前分辨率</div><div id="downloadSummaryResolution" class="stat-value compact-value">-</div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>下载备份</h2>
+        <div class="section-head">
+          <span id="downloadRuntimeStatus" class="status">空闲</span>
+          <div class="buttons compact">
+            <button id="pickFolderBtn" class="button">选择文件夹</button>
+            <button id="downloadBtn" class="button primary">开始下载</button>
+            <button id="pauseDownloadBtn" class="button" disabled>暂停下载</button>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="stat"><div class="stat-label">可下载</div><div id="downloadEligibleCount" class="stat-value">0</div></div>
+          <div class="stat"><div class="stat-label">已下载</div><div id="downloadedCount" class="stat-value">0</div></div>
+          <div class="stat"><div class="stat-label">待下载</div><div id="downloadPendingCount" class="stat-value">0</div></div>
+          <div class="stat"><div class="stat-label">下载失败</div><div id="downloadFailedCount" class="stat-value">0</div></div>
+        </div>
+        <div class="meta-block">
+          <div class="meta-label">批次进度</div>
+          <div id="downloadBatchProgress" class="meta">尚未开始下载</div>
+        </div>
+        <div class="meta-block">
+          <div class="meta-label">下载记录目录</div>
+          <div id="downloadTargetMeta" class="meta">默认使用浏览器下载目录</div>
+        </div>
+        <div class="meta-block">
+          <div class="meta-label">当前下载记录</div>
+          <div id="downloadCursorBox" class="meta">尚无数据</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>通用</h2>
+        <div class="buttons">
+          <button id="profileBtn" class="button">检测登录</button>
+          <button id="importBtn" class="button">导入进度</button>
+          <button id="stopBtn" class="button" disabled>停止</button>
+        </div>
+        <input id="importFile" type="file" accept="application/json,.json" hidden />
+      </div>
+
+      <div class="panel">
+        <h2>喜欢转收藏</h2>
+        <div class="section-head">
+          <span id="favoriteRuntimeStatus" class="status">空闲</span>
+          <div class="buttons compact">
+            <button id="favoriteBtn" class="button primary">继续收藏</button>
+            <button id="auditBtn" class="button">审计最近</button>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="stat"><div class="stat-label">总数</div><div id="totalCount" class="stat-value">0</div></div>
+          <div class="stat"><div class="stat-label">已收藏</div><div id="successCount" class="stat-value">0</div></div>
+          <div class="stat"><div class="stat-label">待处理</div><div id="pendingCount" class="stat-value">0</div></div>
+          <div class="stat"><div class="stat-label">暂停/阻塞</div><div id="pausedCount" class="stat-value">0</div></div>
+        </div>
+        <div class="grid compact-grid" style="margin-top:8px">
+          <div class="stat"><div class="stat-label">审计返工</div><div id="auditPendingCount" class="stat-value">0</div></div>
+        </div>
+        <div class="meta-block">
+          <div class="meta-label">当前收藏进度</div>
+          <div id="favoriteCursorBox" class="meta">尚无数据</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>配置</h2>
+        <div class="grid">
+          <label class="field">每批数量<input id="batchSize" type="number" min="1" value="100" /></label>
+          <label class="field">审计数量<input id="auditRecent" type="number" min="0" value="120" /></label>
+          <label class="field">最小间隔<input id="minDelayMs" type="number" min="0" value="300" /></label>
+          <label class="field">最大间隔<input id="maxDelayMs" type="number" min="0" value="900" /></label>
+        </div>
+        <label class="checkline"><input id="syncLikedBeforeRun" type="checkbox" />运行前刷新喜欢列表</label>
+        <label class="checkline"><input id="downloadCovers" type="checkbox" checked />下载封面</label>
+        <label class="checkline"><input id="downloadPreferBestQuality" type="checkbox" checked />下载顶配画质（优先更大分辨率/码率）</label>
+        <label class="checkline"><input id="downloadUseSavedFolder" type="checkbox" checked />优先写入上次选择的文件夹</label>
+      </div>
+
+      <div class="panel">
+        <h2>日志</h2>
+        <div id="latestLog" class="latest-log">暂无日志</div>
+        <div id="log" class="log"></div>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

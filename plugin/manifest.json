@@ -12,7 +12,8 @@
   "permissions": [
     "storage",
     "tabs",
-    "downloads"
+    "downloads",
+    "downloads.ui"
   ],
   "host_permissions": [
     "https://www.douyin.com/*",
@@ -50,6 +51,8 @@
         "src/sidebar/index.html",
         "src/sidebar/app.js",
         "src/sidebar/style.css",
+        "src/folder-picker/index.html",
+        "src/folder-picker/app.js",
         "src/shared/db.js",
         "src/shared/state.js",
         "src/shared/api.js",

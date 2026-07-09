@@ -78,12 +78,13 @@ export async function clearItems() {
   await txDone(tx);
 }
 
-export async function addLog(text, level = "info") {
+export async function addLog(text, level = "info", meta = null) {
   const db = await openDb();
   const tx = db.transaction("logs", "readwrite");
   tx.objectStore("logs").add({
     text,
     level,
+    meta,
     createdAt: new Date().toISOString(),
   });
   await txDone(tx);

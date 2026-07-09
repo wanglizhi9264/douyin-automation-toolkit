@@ -7,8 +7,8 @@ import { stdin as input, stdout as output } from "node:process";
 import { chromium } from "playwright";
 
 const ROOT = process.cwd();
-const STATE_PATH = path.join(ROOT, "douyin-favorite-progress.json");
-const CONFIG_PATH = path.join(ROOT, "douyin-favorite.config.json");
+const STATE_PATH = path.join(ROOT, "data", "douyin-favorite-progress.json");
+const CONFIG_PATH = path.join(ROOT, "config", "douyin-favorite.config.json");
 const PROFILE_DIR = path.join(ROOT, ".douyin-playwright-profile");
 const DEFAULT_START_URL = "https://www.douyin.com/";
 const DEFAULT_CONFIG = {
@@ -147,6 +147,7 @@ function upsertItem(state, url, indexHint = null) {
 function upsertAwemeItem(state, aweme, indexHint = null) {
   const videoId = String(aweme.aweme_id || aweme.awemeId || aweme.id || "");
   if (!videoId) return null;
+  const incomingCollectStat = aweme.collect_stat ?? null;
   let item = state.items.find((candidate) => candidate.videoId === videoId);
   if (!item) {
     item = {
@@ -156,7 +157,7 @@ function upsertAwemeItem(state, aweme, indexHint = null) {
       source: "favorite_api",
       status: "pending",
       attempts: 0,
-      collectStat: aweme.collect_stat ?? null,
+      collectStat: incomingCollectStat,
       desc: aweme.desc ?? "",
       author: aweme.author?.nickname ?? "",
       lastError: null,
@@ -166,9 +167,16 @@ function upsertAwemeItem(state, aweme, indexHint = null) {
     state.items.push(item);
   }
   item.source = "favorite_api";
-  item.collectStat = aweme.collect_stat ?? item.collectStat ?? null;
+  item.collectStat = incomingCollectStat ?? item.collectStat ?? null;
   item.desc = aweme.desc ?? item.desc ?? "";
   item.author = aweme.author?.nickname ?? item.author ?? "";
+  if (incomingCollectStat === 1) {
+    if (item.status === "pending" || item.status == null) item.status = "already_favorited";
+    item.lastError = null;
+  } else if (incomingCollectStat === 0 && SUCCESS_STATUSES.has(item.status)) {
+    item.status = "pending";
+    item.lastError = "喜欢列表同步发现未收藏，已重新标回 pending";
+  }
   item.updatedAt = nowIso();
   return item;
 }
@@ -705,7 +713,7 @@ async function runApiCommand(args) {
       return;
     }
     state.secUid = secUid;
-    let cursor = state.apiCursor ?? 0;
+    let cursor = 0;
     let pageNo = 0;
     let noNewPages = 0;
     while (pageNo < maxPages) {
@@ -848,6 +856,9 @@ async function auditCommand(args) {
   for (const item of candidates) {
     const result = await fetchAwemeDetailWithRetry(page, item.videoId, options.retries, options.retryBaseDelayMs);
     checked += 1;
+    if (checked % 100 === 0) {
+      console.log(`审计进度: ${checked}/${candidates.length}`);
+    }
 
     if (result.statusCode === 2053) {
       item.status = "skipped_inaccessible";
@@ -976,7 +987,7 @@ async function main() {
   if (command === "cycle") return cycleCommand(args);
 
   console.error(`未知命令: ${command}`);
-  console.error("用法: node scripts/douyin-favorite-liked.mjs login|probe|run [--liked-url URL] [--max N]");
+  console.error("用法: npm run douyin:run -- [--liked-url URL] [--max N]");
   process.exitCode = 1;
 }
 
