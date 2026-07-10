@@ -1,7 +1,7 @@
 import { sendPageRequest } from "../shared/events.js";
 import { addLog, getAll, putItems } from "../shared/db.js";
 import { DEFAULT_CONFIG, importProgress, loadConfig, saveConfig, summarize } from "../shared/state.js";
-import { describeVideoCandidate, pickVideoUrl } from "../shared/api.js";
+import { describeVideoCandidate, pickVideoCandidates, pickVideoUrl } from "../shared/api.js";
 import { chooseDownloadTarget, downloadUrl, getStoredDownloadTarget, readTextFile, writeFile } from "../shared/download.js";
 
 const $ = (id) => document.getElementById(id);
@@ -711,6 +711,48 @@ function paddedIndex(item) {
   return String(Number(item.index ?? 0) + 1).padStart(6, "0");
 }
 
+async function chooseDownloadCandidate(item, candidates, { allowFallback = true } = {}) {
+  if (!candidates.length) {
+    throw new Error("未找到可下载视频地址");
+  }
+  const errors = [];
+  const limit = allowFallback ? Math.min(candidates.length, 3) : 1;
+  for (let i = 0; i < limit; i += 1) {
+    const candidate = candidates[i];
+    downloadBatchState.currentResolution = describeVideoCandidate(candidate);
+    updateDownloadBatchProgress();
+    try {
+      const precheck = await sendPageRequest("PRECHECK_URL", {
+        url: candidate.url,
+        options: { expected: "video" },
+      }, 30000);
+      logLine(`视频预检通过：#${item.index} ${item.awemeId} ${precheck.sizeLabel || ""} ${precheck.contentType || ""} ${describeVideoCandidate(candidate)}`, {
+        type: i === 0 ? "download_precheck_success" : "download_precheck_candidate_success",
+        awemeId: item.awemeId,
+        index: item.index,
+        candidateRank: i + 1,
+        contentType: precheck.contentType || "",
+        contentLength: precheck.contentLength || 0,
+        url: candidate.url,
+        quality: candidate,
+      });
+      return { candidate, precheck, rank: i + 1 };
+    } catch (error) {
+      errors.push(`#${i + 1} ${describeVideoCandidate(candidate)} ${error.message}`);
+      logLine(`视频预检失败：#${item.index} ${item.awemeId} 候选${i + 1} ${describeVideoCandidate(candidate)} ${error.message}`, {
+        type: "download_precheck_candidate_failed",
+        awemeId: item.awemeId,
+        index: item.index,
+        candidateRank: i + 1,
+        url: candidate.url,
+        error: error.message,
+        quality: candidate,
+      });
+    }
+  }
+  throw new Error(`没有可用的视频候选：${errors.join(" | ")}`);
+}
+
 async function downloadOne(item, rootHandle, config) {
   downloadBatchState.currentIndex = item.index;
   downloadBatchState.currentAwemeId = item.awemeId;
@@ -721,18 +763,22 @@ async function downloadOne(item, rootHandle, config) {
   let detail = null;
   let candidate = null;
   let fallbackCandidate = null;
+  let rankedCandidates = [];
   if (config.downloadPreferBestQuality || !videoUrl || (config.downloadCovers && !coverUrl)) {
     detail = await sendPageRequest("FETCH_AWEME_DETAIL", { awemeId: item.awemeId }, 30000);
     if (!detail.ok) throw new Error(`详情获取失败：${resultError(detail)}`);
-    candidate = pickVideoUrl(detail.aweme, { preferBestQuality: config.downloadPreferBestQuality });
+    rankedCandidates = pickVideoCandidates(detail.aweme, { preferBestQuality: config.downloadPreferBestQuality });
+    candidate = rankedCandidates[0] || null;
     fallbackCandidate = pickVideoUrl(detail.aweme, { preferBestQuality: false });
     videoUrl = candidate?.url || videoUrl;
     coverUrl = detail.coverUrl || coverUrl;
   }
   if (!videoUrl) throw new Error("未找到可下载视频地址");
   if (!candidate && detail?.aweme) {
-    candidate = pickVideoUrl(detail.aweme, { preferBestQuality: config.downloadPreferBestQuality });
+    rankedCandidates = pickVideoCandidates(detail.aweme, { preferBestQuality: config.downloadPreferBestQuality });
+    candidate = rankedCandidates[0] || null;
   }
+  if (!rankedCandidates.length && candidate?.url) rankedCandidates = [candidate];
   downloadBatchState.currentResolution = describeVideoCandidate(candidate);
   updateDownloadBatchProgress();
 
@@ -742,19 +788,15 @@ async function downloadOne(item, rootHandle, config) {
   const coverPath = `${sourceFolder}/封面/${base}.jpg`;
   const manifestPath = `data/.appdata/manifests/${base}.json`;
   let videoPrecheck = null;
+  let selectedCandidateRank = 1;
   try {
-    videoPrecheck = await sendPageRequest("PRECHECK_URL", {
-      url: videoUrl,
-      options: { expected: "video" },
-    }, 30000);
-    logLine(`视频预检通过：#${item.index} ${item.awemeId} ${videoPrecheck.sizeLabel || ""} ${videoPrecheck.contentType || ""}`, {
-      type: "download_precheck_success",
-      awemeId: item.awemeId,
-      index: item.index,
-      contentType: videoPrecheck.contentType || "",
-      contentLength: videoPrecheck.contentLength || 0,
-      url: videoUrl,
+    const selected = await chooseDownloadCandidate(item, rankedCandidates.length ? rankedCandidates : [{ ...candidate, url: videoUrl }], {
+      allowFallback: Boolean(config.downloadPreferBestQuality),
     });
+    candidate = selected.candidate;
+    videoUrl = candidate.url;
+    videoPrecheck = selected.precheck;
+    selectedCandidateRank = selected.rank;
     if (rootHandle.kind === "filesystem") {
       await sendPageRequest("DOWNLOAD_TO_FOLDER", {
         rootHandle: rootHandle.handle,
@@ -770,7 +812,7 @@ async function downloadOne(item, rootHandle, config) {
       && fallbackCandidate?.url
       && fallbackCandidate.url !== videoUrl;
     if (!canFallback) throw error;
-    logLine(`顶配下载失败，回退普通画质重试：#${item.index} ${item.awemeId} ${error.message}`, {
+    logLine(`顶配候选不可用，回退普通画质重试：#${item.index} ${item.awemeId} ${error.message}`, {
       type: "download_retry_fallback",
       awemeId: item.awemeId,
       index: item.index,
@@ -786,6 +828,7 @@ async function downloadOne(item, rootHandle, config) {
       options: { expected: "video" },
     }, 30000);
     videoPrecheck = fallbackPrecheck;
+    selectedCandidateRank = 99;
     logLine(`回退视频预检通过：#${item.index} ${item.awemeId} ${fallbackPrecheck.sizeLabel || ""}`, {
       type: "download_precheck_fallback_success",
       awemeId: item.awemeId,
@@ -834,6 +877,9 @@ async function downloadOne(item, rootHandle, config) {
     createTime: detail?.createTime || item.createTime || 0,
     url: item.url,
     downloadedAt: new Date().toISOString(),
+    selectedCandidateRank,
+    selectedQuality: candidate,
+    candidates: rankedCandidates.slice(0, 5),
     precheck: videoPrecheck,
     files: {
       video: videoPath,
@@ -848,7 +894,11 @@ async function downloadOne(item, rootHandle, config) {
     downloadStatus: "downloaded",
     downloadQualityLabel: describeVideoCandidate(candidate),
     downloadWidth: candidate?.width || 0,
+    downloadHeight: candidate?.height || 0,
     downloadBitrate: candidate?.bitrate || 0,
+    downloadCodec: candidate?.codec || "",
+    downloadFps: candidate?.fps || 0,
+    downloadCandidateRank: selectedCandidateRank,
     downloadSize: videoPrecheck.contentLength || candidate?.size || 0,
     downloadVideoPath: videoPath,
     downloadCoverPath: config.downloadCovers && coverUrl ? coverPath : "",
@@ -865,9 +915,13 @@ async function downloadOne(item, rootHandle, config) {
     quality: candidate ? {
       codec: candidate.codec,
       width: candidate.width,
+      height: candidate.height,
+      fps: candidate.fps,
       bitrate: candidate.bitrate,
       size: candidate.size,
+      source: candidate.source,
     } : null,
+    candidateRank: selectedCandidateRank,
     targetKind: rootHandle.kind,
     folderName: rootHandle.label || "",
   });
