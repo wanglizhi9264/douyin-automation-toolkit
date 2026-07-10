@@ -74,6 +74,7 @@ async function fetchAwemeDetail(awemeId) {
     desc: aweme?.desc ?? "",
     authorName: aweme?.author?.nickname ?? "",
     authorUid: aweme?.author?.uid ?? "",
+    createTime: aweme?.create_time ?? 0,
     coverUrl: aweme?.video?.cover?.url_list?.[0] || "",
     aweme,
   };
@@ -92,29 +93,88 @@ async function writeToHandle(rootHandle, relativePath, data) {
   await writable.close();
 }
 
-async function downloadToFolder(rootHandle, relativePath, url) {
+async function precheckUrl(url, { expected = "video" } = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
   let response;
   try {
     response = await fetch(url, {
       credentials: "omit",
       mode: "cors",
+      signal: controller.signal,
       headers: {
         "accept": "*/*",
       },
     });
   } catch (error) {
+    throw new Error(`预检失败：${error?.message || String(error)}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+  const contentType = response.headers.get("content-type") || "";
+  const contentLength = Number(response.headers.get("content-length") || 0);
+  const acceptRanges = response.headers.get("accept-ranges") || "";
+  if (!String(response.status).startsWith("2")) {
+    await response.body?.cancel?.().catch(() => {});
+    throw new Error(`预检失败：HTTP ${response.status}`);
+  }
+  if (response.status === 206) {
+    await response.body?.cancel?.().catch(() => {});
+    throw new Error("预检失败：分段响应 206");
+  }
+  if (expected === "video" && !contentType.includes("video/mp4")) {
+    await response.body?.cancel?.().catch(() => {});
+    throw new Error(`预检失败：视频 MIME 为 ${contentType || "unknown"}`);
+  }
+  if (expected === "image" && !contentType.startsWith("image/")) {
+    await response.body?.cancel?.().catch(() => {});
+    throw new Error(`预检失败：封面 MIME 为 ${contentType || "unknown"}`);
+  }
+  if (expected === "video" && !contentLength) {
+    await response.body?.cancel?.().catch(() => {});
+    throw new Error("预检失败：未知视频大小");
+  }
+  await response.body?.cancel?.().catch(() => {});
+  return {
+    ok: true,
+    httpStatus: response.status,
+    contentType,
+    contentLength,
+    acceptRanges,
+    sizeLabel: contentLength ? `${(contentLength / 1024 / 1024).toFixed(1)}MB` : "",
+  };
+}
+
+async function downloadToFolder(rootHandle, relativePath, url, options = {}) {
+  const expected = options.expected || "video";
+  const precheck = await precheckUrl(url, { expected });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 100000);
+  let response;
+  try {
+    response = await fetch(url, {
+      credentials: "omit",
+      mode: "cors",
+      signal: controller.signal,
+      headers: { "accept": "*/*" },
+    });
+  } catch (error) {
     throw new Error(`页面抓取失败：${error?.message || String(error)}`);
+  } finally {
+    clearTimeout(timeout);
   }
-  if (!response.ok) {
-    throw new Error(`页面抓取失败：HTTP ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`页面抓取失败：HTTP ${response.status}`);
   const blob = await response.blob();
   if (!blob.size) throw new Error("页面抓取失败：0 字节");
+  if (precheck.contentLength && blob.size !== precheck.contentLength) {
+    throw new Error(`页面抓取失败：大小不一致 ${blob.size}/${precheck.contentLength}`);
+  }
   await writeToHandle(rootHandle, relativePath, blob);
   return {
     ok: true,
     size: blob.size,
     contentType: blob.type || "",
+    precheck,
   };
 }
 
@@ -136,8 +196,12 @@ window.addEventListener("message", async (event) => {
       reply(requestId, type, await fetchAwemeDetail(payload.awemeId));
       return;
     }
+    if (type === "PRECHECK_URL") {
+      reply(requestId, type, await precheckUrl(payload.url, payload.options || {}));
+      return;
+    }
     if (type === "DOWNLOAD_TO_FOLDER") {
-      reply(requestId, type, await downloadToFolder(payload.rootHandle, payload.relativePath, payload.url));
+      reply(requestId, type, await downloadToFolder(payload.rootHandle, payload.relativePath, payload.url, payload.options || {}));
       return;
     }
     reply(requestId, type, null, `Unknown request type: ${type}`);

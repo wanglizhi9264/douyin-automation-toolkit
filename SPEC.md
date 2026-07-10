@@ -47,6 +47,14 @@
 - 下载前校验 HTTP 状态、`content-type` 是否包含 `video/mp4`、`content-length` 是否存在、结果是否 0 字节。
 - 对 403、分段响应、超时、大文件等情况有专门失败路径或重试路径。
 
+已迁移到本项目的下载策略：
+
+- 优先使用用户授权的本地文件夹，而不是浏览器下载目录。
+- 保存结构采用 `data/点赞/视频`、`data/点赞/封面`、`data/.appdata`。
+- 每条下载前增加预检：HTTP 2xx、非 206、视频 MIME 为 `video/mp4`、视频大小存在、结果非 0 字节。
+- 顶配画质预检或下载失败时，自动回退到普通 h264 候选地址。
+- 本地 `.appdata` 写入 `download-state.json`、`db_likes.json`、`db_authors.json`、`db_videos.json`、`db_texts.json` 和单条 manifest。
+
 学习边界：
 
 - 不复制第三方扩展实现代码。

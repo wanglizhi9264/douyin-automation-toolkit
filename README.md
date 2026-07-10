@@ -49,7 +49,8 @@ npm run zip
 - 从断点继续收藏
 - 已收藏作品直接算成功
 - 审计最近处理过的作品，漏收藏会标回待处理
-- 下载已成功收藏作品的视频、封面和单条 manifest
+- 下载已成功收藏作品的视频、封面、单条 manifest 和本地数据库文件
+- 下载前校验 HTTP 状态、MIME 类型、文件大小和 0 字节等异常
 - 遇到限流、登录异常或接口异常时暂停并记录原因
 
 ## 后端脚本
@@ -95,6 +96,29 @@ plugin/dist/
 ```
 
 这些文件包含运行状态、浏览器 profile 或构建产物，只在本机使用。
+
+## 下载保存结构
+
+插件优先写入用户授权的本地文件夹。目录结构参考抖珍藏的备份习惯，但由本项目重新实现：
+
+```text
+data/
+├── 点赞/
+│   ├── 视频/
+│   │   └── <awemeId>.mp4
+│   └── 封面/
+│       └── <awemeId>.jpg
+└── .appdata/
+    ├── download-state.json
+    ├── db_likes.json
+    ├── db_authors.json
+    ├── db_videos.json
+    ├── db_texts.json
+    └── manifests/
+        └── <awemeId>.json
+本地库.html
+说明.txt
+```
 
 ## GitHub
 

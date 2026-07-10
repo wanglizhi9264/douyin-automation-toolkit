@@ -66,11 +66,20 @@ function updateDownloadBatchProgress() {
 }
 
 function getDownloadRecordPath() {
-  return "DouyinBackup/records/download-state.json";
+  return "data/.appdata/download-state.json";
 }
 
 function getDownloadReportPath() {
-  return "DouyinBackup/index.html";
+  return "本地库.html";
+}
+
+function getSourceFolder(source) {
+  if (source === "bookmarked") return "data/收藏";
+  return "data/点赞";
+}
+
+function buildMediaBase(item) {
+  return String(item.awemeId);
 }
 
 function getTargetCacheKey(target) {
@@ -136,6 +145,9 @@ function buildDownloadRecord(items, state) {
       resolution: item.downloadQualityLabel || "",
       width: item.downloadWidth || 0,
       bitrate: item.downloadBitrate || 0,
+      size: item.downloadSize || 0,
+      videoPath: item.downloadVideoPath || "",
+      coverPath: item.downloadCoverPath || "",
       url: item.url || "",
       lastError: item.lastError || "",
       updatedAt: item.updatedAt || "",
@@ -203,7 +215,73 @@ async function persistDownloadArtifacts(target, batchState) {
   const record = buildDownloadRecord(items, batchState);
   await writeFile(target, getDownloadRecordPath(), `${JSON.stringify(record, null, 2)}\n`);
   await writeFile(target, getDownloadReportPath(), buildDownloadReportHtml(record, target.label || ""));
+  await writeLocalDatabaseFiles(target, items, record);
   setCachedDownloadRecord(target, record);
+}
+
+function buildLocalDatabase(items, record) {
+  const eligibleItems = items.filter((item) => ["favorited", "already_favorited"].includes(item.status));
+  const downloaded = eligibleItems.filter((item) => item.downloadStatus === "downloaded");
+  const authors = {};
+  const videos = {};
+  const texts = {};
+  for (const item of eligibleItems) {
+    if (item.authorUid) {
+      authors[item.authorUid] = {
+        uid: item.authorUid,
+        nickname: item.authorName || "",
+      };
+    }
+    videos[item.awemeId] = {
+      awemeId: item.awemeId,
+      authorUid: item.authorUid || "",
+      createTime: item.createTime || 0,
+      source: item.source || "liked",
+      status: item.status || "",
+      downloadStatus: item.downloadStatus || "not_started",
+      video: item.downloadVideoPath || "",
+      cover: item.downloadCoverPath || "",
+      width: item.downloadWidth || 0,
+      bitrate: item.downloadBitrate || 0,
+      quality: item.downloadQualityLabel || "",
+      size: item.downloadSize || 0,
+      url: item.url || "",
+      updatedAt: item.updatedAt || "",
+    };
+    texts[item.awemeId] = item.desc || "";
+  }
+  return {
+    db_likes: {
+      schemaVersion: 1,
+      generatedAt: record.generatedAt,
+      likes: {
+        total: eligibleItems.length,
+        downloaded: downloaded.map((item) => item.awemeId),
+        pending: eligibleItems.filter((item) => item.downloadStatus !== "downloaded").map((item) => item.awemeId),
+        failed: eligibleItems.filter((item) => item.downloadStatus === "failed").map((item) => item.awemeId),
+      },
+    },
+    db_authors: authors,
+    db_videos: videos,
+    db_texts: texts,
+  };
+}
+
+async function writeLocalDatabaseFiles(target, items, record) {
+  const db = buildLocalDatabase(items, record);
+  await writeFile(target, "data/.appdata/db_likes.json", `${JSON.stringify(db.db_likes, null, 2)}\n`);
+  await writeFile(target, "data/.appdata/db_authors.json", `${JSON.stringify(db.db_authors, null, 2)}\n`);
+  await writeFile(target, "data/.appdata/db_videos.json", `${JSON.stringify(db.db_videos, null, 2)}\n`);
+  await writeFile(target, "data/.appdata/db_texts.json", `${JSON.stringify(db.db_texts, null, 2)}\n`);
+  await writeFile(target, "说明.txt", [
+    "抖音收藏备份助手",
+    "",
+    "data/点赞/视频 保存视频文件",
+    "data/点赞/封面 保存封面文件",
+    "data/.appdata 保存本地数据库和下载状态",
+    "本地库.html 可用于查看下载概览",
+    "",
+  ].join("\n"));
 }
 
 async function recoverDownloadedItemsFromFolderRecord(target) {
@@ -658,16 +736,34 @@ async function downloadOne(item, rootHandle, config) {
   downloadBatchState.currentResolution = describeVideoCandidate(candidate);
   updateDownloadBatchProgress();
 
-  const base = `${paddedIndex(item)}-${item.awemeId}`;
+  const sourceFolder = getSourceFolder(item.source);
+  const base = buildMediaBase(item);
+  const videoPath = `${sourceFolder}/视频/${base}.mp4`;
+  const coverPath = `${sourceFolder}/封面/${base}.jpg`;
+  const manifestPath = `data/.appdata/manifests/${base}.json`;
+  let videoPrecheck = null;
   try {
+    videoPrecheck = await sendPageRequest("PRECHECK_URL", {
+      url: videoUrl,
+      options: { expected: "video" },
+    }, 30000);
+    logLine(`视频预检通过：#${item.index} ${item.awemeId} ${videoPrecheck.sizeLabel || ""} ${videoPrecheck.contentType || ""}`, {
+      type: "download_precheck_success",
+      awemeId: item.awemeId,
+      index: item.index,
+      contentType: videoPrecheck.contentType || "",
+      contentLength: videoPrecheck.contentLength || 0,
+      url: videoUrl,
+    });
     if (rootHandle.kind === "filesystem") {
       await sendPageRequest("DOWNLOAD_TO_FOLDER", {
         rootHandle: rootHandle.handle,
-        relativePath: `DouyinBackup/success/videos/${base}.mp4`,
+        relativePath: videoPath,
         url: videoUrl,
+        options: { expected: "video" },
       }, 120000);
     } else {
-      await downloadUrl(rootHandle, `DouyinBackup/success/videos/${base}.mp4`, videoUrl);
+      await downloadUrl(rootHandle, videoPath, videoUrl);
     }
   } catch (error) {
     const canFallback = config.downloadPreferBestQuality
@@ -685,26 +781,45 @@ async function downloadOne(item, rootHandle, config) {
     videoUrl = fallbackCandidate.url;
     downloadBatchState.currentResolution = describeVideoCandidate(candidate);
     updateDownloadBatchProgress();
+    const fallbackPrecheck = await sendPageRequest("PRECHECK_URL", {
+      url: videoUrl,
+      options: { expected: "video" },
+    }, 30000);
+    videoPrecheck = fallbackPrecheck;
+    logLine(`回退视频预检通过：#${item.index} ${item.awemeId} ${fallbackPrecheck.sizeLabel || ""}`, {
+      type: "download_precheck_fallback_success",
+      awemeId: item.awemeId,
+      index: item.index,
+      contentType: fallbackPrecheck.contentType || "",
+      contentLength: fallbackPrecheck.contentLength || 0,
+      url: videoUrl,
+    });
     if (rootHandle.kind === "filesystem") {
       await sendPageRequest("DOWNLOAD_TO_FOLDER", {
         rootHandle: rootHandle.handle,
-        relativePath: `DouyinBackup/success/videos/${base}.mp4`,
+        relativePath: videoPath,
         url: videoUrl,
+        options: { expected: "video" },
       }, 120000);
     } else {
-      await downloadUrl(rootHandle, `DouyinBackup/success/videos/${base}.mp4`, videoUrl);
+      await downloadUrl(rootHandle, videoPath, videoUrl);
     }
   }
 
   if (config.downloadCovers && coverUrl) {
+    await sendPageRequest("PRECHECK_URL", {
+      url: coverUrl,
+      options: { expected: "image" },
+    }, 30000);
     if (rootHandle.kind === "filesystem") {
       await sendPageRequest("DOWNLOAD_TO_FOLDER", {
         rootHandle: rootHandle.handle,
-        relativePath: `DouyinBackup/success/covers/${base}.jpg`,
+        relativePath: coverPath,
         url: coverUrl,
+        options: { expected: "image" },
       }, 120000);
     } else {
-      await downloadUrl(rootHandle, `DouyinBackup/success/covers/${base}.jpg`, coverUrl);
+      await downloadUrl(rootHandle, coverPath, coverUrl);
     }
   }
 
@@ -715,14 +830,17 @@ async function downloadOne(item, rootHandle, config) {
     status: item.status,
     desc: detail?.desc || item.desc || "",
     authorName: detail?.authorName || item.authorName || "",
+    authorUid: detail?.authorUid || item.authorUid || "",
+    createTime: detail?.createTime || item.createTime || 0,
     url: item.url,
     downloadedAt: new Date().toISOString(),
+    precheck: videoPrecheck,
     files: {
-      video: `success/videos/${base}.mp4`,
-      cover: config.downloadCovers && coverUrl ? `success/covers/${base}.jpg` : null,
+      video: videoPath,
+      cover: config.downloadCovers && coverUrl ? coverPath : null,
     },
   };
-  await writeFile(rootHandle, `DouyinBackup/success/manifests/${base}.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(rootHandle, manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
   await saveItem(patchItem(item, {
     videoUrl,
@@ -731,6 +849,12 @@ async function downloadOne(item, rootHandle, config) {
     downloadQualityLabel: describeVideoCandidate(candidate),
     downloadWidth: candidate?.width || 0,
     downloadBitrate: candidate?.bitrate || 0,
+    downloadSize: videoPrecheck.contentLength || candidate?.size || 0,
+    downloadVideoPath: videoPath,
+    downloadCoverPath: config.downloadCovers && coverUrl ? coverPath : "",
+    authorUid: detail?.authorUid || item.authorUid || "",
+    authorName: detail?.authorName || item.authorName || "",
+    createTime: detail?.createTime || item.createTime || 0,
     lastError: "",
   }));
   logLine(`下载成功：#${item.index} ${item.awemeId} ${describeVideoCandidate(candidate)}`, {
