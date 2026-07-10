@@ -13,6 +13,8 @@ let downloadPauseRequested = false;
 let downloadBatchState = {
   total: 0,
   completed: 0,
+  inspected: 0,
+  currentOrder: 0,
   currentIndex: null,
   currentAwemeId: "",
   currentResolution: "",
@@ -72,11 +74,19 @@ function updateDownloadBatchProgress() {
   if (!state.total) {
     $("downloadBatchProgress").innerHTML = "尚未开始下载";
     $("downloadTaskProgress").innerHTML = "尚未开始下载";
+    $("downloadTaskTotal").textContent = "0";
+    $("downloadTaskCompleted").textContent = "0";
+    $("downloadTaskCursor").textContent = "-";
+    $("downloadTaskChecked").textContent = "-";
     return;
   }
+  $("downloadTaskTotal").textContent = String(state.total);
+  $("downloadTaskCompleted").textContent = String(state.completed);
+  $("downloadTaskCursor").textContent = state.currentOrder ? `${state.currentOrder} / ${state.total}` : "-";
+  $("downloadTaskChecked").textContent = state.inspected ? `${state.inspected} / ${state.total}` : "-";
   const currentLine = state.currentIndex == null
     ? ""
-    : `当前：#${escapeHtml(state.currentIndex)} ${escapeHtml(state.currentAwemeId || "")}`;
+    : `当前：第 ${escapeHtml(state.currentOrder || "-")} 个 · #${escapeHtml(state.currentIndex)} ${escapeHtml(state.currentAwemeId || "")}`;
   const resolutionLine = state.currentResolution ? `分辨率：${escapeHtml(state.currentResolution)}` : "";
   const progressHtml = [
     `状态：${escapeHtml(state.phase)}`,
@@ -530,9 +540,14 @@ async function render() {
   $("downloadSummaryResolution").textContent = downloadBatchState.currentResolution
     || recordCursorItem?.resolution
     || "-";
-  $("downloadTaskCursor").textContent = downloadBatchState.currentIndex != null
-    ? `#${downloadBatchState.currentIndex}`
+  $("downloadTaskCursor").textContent = downloadBatchState.currentOrder
+    ? `${downloadBatchState.currentOrder} / ${downloadBatchState.total || "-"}`
     : (recordCursorItem?.index != null ? `#${recordCursorItem.index}` : "-");
+  $("downloadTaskChecked").textContent = downloadBatchState.inspected
+    ? `${downloadBatchState.inspected} / ${downloadBatchState.total || "-"}`
+    : "-";
+  $("downloadTaskTotal").textContent = downloadBatchState.total ? String(downloadBatchState.total) : String(folderRecord?.eligibleTotal ?? 0);
+  $("downloadTaskCompleted").textContent = String(downloadBatchState.completed || 0);
   $("downloadTaskResolution").textContent = downloadBatchState.currentResolution || recordCursorItem?.resolution || "-";
   $("favoriteCursorBox").innerHTML = state.favorite.cursor
     ? [
@@ -879,6 +894,7 @@ async function chooseDownloadCandidate(item, candidates, { allowFallback = true 
 }
 
 async function downloadOne(item, rootHandle, config) {
+  downloadBatchState.inspected = Math.max(downloadBatchState.inspected, downloadBatchState.currentOrder || 0);
   downloadBatchState.currentIndex = item.index;
   downloadBatchState.currentAwemeId = item.awemeId;
   downloadBatchState.phase = "下载中";
@@ -1062,6 +1078,8 @@ async function runDownloadBatch(scope = "liked") {
   downloadBatchState = {
     total: 0,
     completed: 0,
+    inspected: 0,
+    currentOrder: 0,
     currentIndex: null,
     currentAwemeId: "",
     phase: "准备下载",
@@ -1136,7 +1154,10 @@ async function runDownloadBatch(scope = "liked") {
         preferBestQuality: Boolean(config.downloadPreferBestQuality),
     });
     let downloaded = 0;
-    for (const item of items) {
+    for (const [offset, item] of items.entries()) {
+      downloadBatchState.currentOrder = offset + 1;
+      downloadBatchState.inspected = offset + 1;
+      updateDownloadBatchProgress();
       if (downloadPauseRequested) {
         downloadBatchState.phase = "已暂停";
         logLine(`${scopeDef.label}下载已暂停：完成 ${downloaded}/${items.length} 条`, {
@@ -1196,6 +1217,8 @@ async function runDownloadBatch(scope = "liked") {
     downloadBatchState.currentIndex = null;
     downloadBatchState.currentAwemeId = "";
     downloadBatchState.currentResolution = "";
+    downloadBatchState.currentOrder = 0;
+    downloadBatchState.inspected = 0;
     updateButtons();
     await render();
   }
