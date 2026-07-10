@@ -19,6 +19,7 @@
       <div id="pageMeta" class="meta" style="margin-top:8px">等待抖音页面连接</div>
     </header>
     <section class="content">
+      <div id="homeView">
       <div class="panel hero-panel">
         <h2>下载总览</h2>
         <div class="grid">
@@ -39,7 +40,7 @@
           </div>
         </div>
         <div class="download-actions">
-          <button id="downloadBtn" class="button primary">下载喜欢转收藏视频</button>
+          <button id="downloadBtn" class="button primary">下载喜欢视频</button>
           <button id="downloadBookmarkedBtn" class="button">下载收藏视频</button>
           <button id="downloadFollowingBtn" class="button">下载关注列表视频</button>
         </div>
@@ -128,6 +129,45 @@
         <h2>日志</h2>
         <div id="latestLog" class="latest-log">暂无日志</div>
         <div id="log" class="log"></div>
+      </div>
+      </div>
+
+      <div id="downloadTaskView" class="hidden">
+        <div class="panel hero-panel">
+          <div class="section-head">
+            <span id="downloadTaskScopeStatus" class="status">下载任务</span>
+            <div class="buttons compact">
+              <button id="backToHomeBtn" class="button">返回入口</button>
+              <button id="pauseDownloadTaskBtn" class="button" disabled>暂停下载</button>
+            </div>
+          </div>
+          <h2 id="downloadTaskTitle">下载任务</h2>
+          <div class="grid">
+            <div class="stat"><div class="stat-label">任务范围</div><div id="downloadTaskScope" class="stat-value compact-value">-</div></div>
+            <div class="stat"><div class="stat-label">当前进度</div><div id="downloadTaskCursor" class="stat-value compact-value">-</div></div>
+            <div class="stat"><div class="stat-label">当前分辨率</div><div id="downloadTaskResolution" class="stat-value compact-value">-</div></div>
+            <div class="stat"><div class="stat-label">当前状态</div><div id="downloadTaskPhase" class="stat-value compact-value">空闲</div></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>任务控制</h2>
+          <div class="download-actions">
+            <button id="restartCurrentDownloadBtn" class="button primary">重新开始当前任务</button>
+          </div>
+          <div class="meta-block">
+            <div class="meta-label">批次进度</div>
+            <div id="downloadTaskProgress" class="meta">尚未开始下载</div>
+          </div>
+          <div class="meta-block">
+            <div class="meta-label">下载记录目录</div>
+            <div id="downloadTaskTargetMeta" class="meta">尚未选择文件夹</div>
+          </div>
+          <div class="meta-block">
+            <div class="meta-label">当前下载记录</div>
+            <div id="downloadTaskCursorBox" class="meta">尚无数据</div>
+          </div>
+        </div>
       </div>
     </section>
   </main>

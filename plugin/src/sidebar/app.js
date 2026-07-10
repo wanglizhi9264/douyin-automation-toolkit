@@ -22,6 +22,8 @@ let downloadRecordCache = {
   targetKey: "",
   record: null,
 };
+let currentView = "home";
+let currentDownloadScope = "liked";
 
 async function getSelectedFollowingAuthors() {
   const result = await chrome.storage.local.get(["selectedFollowingAuthors"]);
@@ -56,24 +58,34 @@ function setFavoriteStatus(text) {
 
 function setDownloadStatus(text) {
   $("downloadRuntimeStatus").textContent = text;
+  $("downloadTaskPhase").textContent = text;
+}
+
+function setView(view) {
+  currentView = view;
+  $("homeView").classList.toggle("hidden", view !== "home");
+  $("downloadTaskView").classList.toggle("hidden", view !== "download-task");
 }
 
 function updateDownloadBatchProgress() {
   const state = downloadBatchState;
   if (!state.total) {
     $("downloadBatchProgress").innerHTML = "尚未开始下载";
+    $("downloadTaskProgress").innerHTML = "尚未开始下载";
     return;
   }
   const currentLine = state.currentIndex == null
     ? ""
     : `当前：#${escapeHtml(state.currentIndex)} ${escapeHtml(state.currentAwemeId || "")}`;
   const resolutionLine = state.currentResolution ? `分辨率：${escapeHtml(state.currentResolution)}` : "";
-  $("downloadBatchProgress").innerHTML = [
+  const progressHtml = [
     `状态：${escapeHtml(state.phase)}`,
     `进度：${escapeHtml(state.completed)} / ${escapeHtml(state.total)}`,
     currentLine,
     resolutionLine,
   ].filter(Boolean).join("<br>");
+  $("downloadBatchProgress").innerHTML = progressHtml;
+  $("downloadTaskProgress").innerHTML = progressHtml;
 }
 
 function getDownloadRecordPath() {
@@ -115,12 +127,19 @@ function getDownloadScopeDefinition(scope) {
     };
   }
   return {
-    key: "favorited",
-    label: "喜欢转收藏视频",
-    startText: "已点击开始下载喜欢转收藏视频，正在检查可下载项目",
-    emptyText: "没有待下载的已收藏项目",
+    key: "liked",
+    label: "喜欢视频",
+    startText: "已点击开始下载喜欢视频，正在检查可下载项目",
+    emptyText: "没有待下载的喜欢视频",
     isEligible: (item) => ["favorited", "already_favorited"].includes(item.status) && item.downloadStatus !== "downloaded",
   };
+}
+
+function renderDownloadTaskHeader(scope) {
+  const scopeDef = getDownloadScopeDefinition(scope);
+  $("downloadTaskScopeStatus").textContent = scopeDef.label;
+  $("downloadTaskTitle").textContent = scopeDef.label;
+  $("downloadTaskScope").textContent = scopeDef.label;
 }
 
 function buildMediaBase(item) {
@@ -511,6 +530,10 @@ async function render() {
   $("downloadSummaryResolution").textContent = downloadBatchState.currentResolution
     || recordCursorItem?.resolution
     || "-";
+  $("downloadTaskCursor").textContent = downloadBatchState.currentIndex != null
+    ? `#${downloadBatchState.currentIndex}`
+    : (recordCursorItem?.index != null ? `#${recordCursorItem.index}` : "-");
+  $("downloadTaskResolution").textContent = downloadBatchState.currentResolution || recordCursorItem?.resolution || "-";
   $("favoriteCursorBox").innerHTML = state.favorite.cursor
     ? [
       `Index: ${escapeHtml(state.favorite.cursor.index)}`,
@@ -537,6 +560,9 @@ async function render() {
       `当前勾选该选项时，下载会直接写入这个文件夹，不会出现在浏览器下载记录里。`,
     ].join("<br>")
     : "当前未记住可用文件夹；先点击“选择文件夹”授权目录，否则无法以无浏览器下载记录的方式开始下载。";
+  $("downloadTaskTargetMeta").innerHTML = $("downloadTargetMeta").innerHTML;
+  $("downloadTaskCursorBox").innerHTML = $("downloadCursorBox").innerHTML;
+  renderDownloadTaskHeader(currentDownloadScope);
   renderFollowingAuthors(followingAuthors, selectedFollowingAuthors);
   updateDownloadBatchProgress();
   renderLogs(state.logs);
@@ -554,6 +580,7 @@ function updateButtons() {
   $("downloadBookmarkedBtn").disabled = downloadRunning;
   $("downloadFollowingBtn").disabled = downloadRunning;
   $("pauseDownloadBtn").disabled = !downloadRunning;
+  $("pauseDownloadTaskBtn").disabled = !downloadRunning;
   $("stopBtn").disabled = !running;
 }
 
@@ -1025,11 +1052,12 @@ async function downloadOne(item, rootHandle, config) {
   });
 }
 
-async function runDownloadBatch(scope = "favorited") {
+async function runDownloadBatch(scope = "liked") {
   if (downloadRunning) return;
   downloadRunning = true;
   downloadPauseRequested = false;
   currentDownloadScope = scope;
+  setView("download-task");
   const scopeDef = getDownloadScopeDefinition(scope);
   downloadBatchState = {
     total: 0,
@@ -1225,7 +1253,7 @@ $("auditBtn").addEventListener("click", async () => {
 });
 
 $("downloadBtn").addEventListener("click", async () => {
-  await runDownloadBatch("favorited");
+  await runDownloadBatch("liked");
 });
 
 $("downloadBookmarkedBtn").addEventListener("click", async () => {
@@ -1256,6 +1284,23 @@ $("pauseDownloadBtn").addEventListener("click", () => {
   setDownloadStatus("暂停中");
   setGlobalStatus("下载暂停中");
   updateDownloadBatchProgress();
+});
+
+$("pauseDownloadTaskBtn").addEventListener("click", () => {
+  if (!downloadRunning) return;
+  downloadPauseRequested = true;
+  downloadBatchState.phase = "暂停中";
+  setDownloadStatus("暂停中");
+  setGlobalStatus("下载暂停中");
+  updateDownloadBatchProgress();
+});
+
+$("backToHomeBtn").addEventListener("click", () => {
+  setView("home");
+});
+
+$("restartCurrentDownloadBtn").addEventListener("click", async () => {
+  await runDownloadBatch(currentDownloadScope);
 });
 
 $("closeBtn").addEventListener("click", () => {
