@@ -13,10 +13,15 @@
 .
 ├── AGENTS.md      # 项目给 Agent/协作者看的工作说明
 ├── SPEC.md        # 产品和技术方案说明
+├── docs/          # 经验沉淀、接口说明、约束记录
 ├── plugin/        # Chrome MV3 插件
 ├── backend/       # Playwright 脚本、本地 dashboard、配置和本地数据
 └── frontend/      # 预留的独立前端目录
 ```
+
+接口与经验沉淀文档：
+
+- [docs/douyin-access-surfaces.md](/Users/lichi/Digital_life/07_j/docs/douyin-access-surfaces.md)
 
 ## Chrome 插件
 
