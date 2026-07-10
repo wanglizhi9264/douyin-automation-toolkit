@@ -35,9 +35,13 @@
           <span id="downloadRuntimeStatus" class="status">空闲</span>
           <div class="buttons compact">
             <button id="pickFolderBtn" class="button">选择文件夹</button>
-            <button id="downloadBtn" class="button primary">开始下载</button>
             <button id="pauseDownloadBtn" class="button" disabled>暂停下载</button>
           </div>
+        </div>
+        <div class="download-actions">
+          <button id="downloadBtn" class="button primary">下载喜欢转收藏视频</button>
+          <button id="downloadBookmarkedBtn" class="button">下载收藏视频</button>
+          <button id="downloadFollowingBtn" class="button">下载关注列表视频</button>
         </div>
         <div class="grid">
           <div class="stat"><div class="stat-label">可下载</div><div id="downloadEligibleCount" class="stat-value">0</div></div>
@@ -57,6 +61,19 @@
           <div class="meta-label">当前下载记录</div>
           <div id="downloadCursorBox" class="meta">尚无数据</div>
         </div>
+      </div>
+
+      <div class="panel">
+        <h2>关注作者选择</h2>
+        <div class="section-head">
+          <span id="followingSelectionStatus" class="status">未选择</span>
+          <div class="buttons compact">
+            <button id="selectAllFollowingBtn" class="button">全选</button>
+            <button id="clearFollowingSelectionBtn" class="button">清空</button>
+          </div>
+        </div>
+        <div id="followingSelectionMeta" class="meta">当前还没有可供勾选的关注作者数据。</div>
+        <div id="followingAuthorList" class="selection-list"></div>
       </div>
 
       <div class="panel">

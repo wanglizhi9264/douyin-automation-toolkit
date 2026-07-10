@@ -23,6 +23,17 @@ let downloadRecordCache = {
   record: null,
 };
 
+async function getSelectedFollowingAuthors() {
+  const result = await chrome.storage.local.get(["selectedFollowingAuthors"]);
+  return Array.isArray(result.selectedFollowingAuthors) ? result.selectedFollowingAuthors : [];
+}
+
+async function setSelectedFollowingAuthors(authorUids) {
+  await chrome.storage.local.set({
+    selectedFollowingAuthors: [...new Set((authorUids || []).filter(Boolean).map(String))],
+  });
+}
+
 const SUCCESS_STATUSES = new Set(["favorited", "already_favorited", "skipped_inaccessible"]);
 const RUNNABLE_STATUSES = new Set([
   "pending",
@@ -75,7 +86,41 @@ function getDownloadReportPath() {
 
 function getSourceFolder(source) {
   if (source === "bookmarked") return "data/收藏";
+  if (source === "following") return "data/关注/视频";
   return "data/点赞";
+}
+
+function getDownloadScopeDefinition(scope) {
+  if (scope === "bookmarked") {
+    return {
+      key: "bookmarked",
+      label: "收藏视频",
+      startText: "已点击开始下载收藏视频，正在检查可下载项目",
+      emptyText: "没有待下载的收藏视频",
+      isEligible: (item) => item.source === "bookmarked" && item.downloadStatus !== "downloaded",
+    };
+  }
+  if (scope === "following") {
+    return {
+      key: "following",
+      label: "关注列表视频",
+      startText: "已点击开始下载关注列表视频，正在检查可下载项目",
+      emptyText: "没有待下载的关注列表视频",
+      isEligible: (item, context = {}) => {
+        if (item.source !== "following" || item.downloadStatus === "downloaded") return false;
+        const selected = context.selectedFollowingAuthors || [];
+        if (!selected.length) return true;
+        return selected.includes(String(item.authorUid || ""));
+      },
+    };
+  }
+  return {
+    key: "favorited",
+    label: "喜欢转收藏视频",
+    startText: "已点击开始下载喜欢转收藏视频，正在检查可下载项目",
+    emptyText: "没有待下载的已收藏项目",
+    isEligible: (item) => ["favorited", "already_favorited"].includes(item.status) && item.downloadStatus !== "downloaded",
+  };
 }
 
 function buildMediaBase(item) {
@@ -372,6 +417,53 @@ function renderLogs(logs) {
   $("log").scrollTop = 0;
 }
 
+function buildFollowingAuthors(items) {
+  const grouped = new Map();
+  for (const item of items) {
+    if (item.source !== "following" || !item.authorUid) continue;
+    const key = String(item.authorUid);
+    const entry = grouped.get(key) || {
+      authorUid: key,
+      authorName: item.authorName || "未命名作者",
+      total: 0,
+      pending: 0,
+      downloaded: 0,
+    };
+    entry.total += 1;
+    if (item.downloadStatus === "downloaded") entry.downloaded += 1;
+    else entry.pending += 1;
+    if (!entry.authorName && item.authorName) entry.authorName = item.authorName;
+    grouped.set(key, entry);
+  }
+  return [...grouped.values()].sort((a, b) => b.pending - a.pending || b.total - a.total || a.authorName.localeCompare(b.authorName));
+}
+
+function renderFollowingAuthors(authors, selectedAuthorUids) {
+  const selected = new Set(selectedAuthorUids || []);
+  $("followingSelectionStatus").textContent = authors.length
+    ? `已选 ${authors.filter((author) => selected.has(author.authorUid)).length} / ${authors.length}`
+    : "未选择";
+  $("followingSelectionMeta").textContent = authors.length
+    ? "勾选后，“下载关注列表视频”只会下载这些作者；如果一个都不选，则默认下载全部关注作者。"
+    : "当前还没有可供勾选的关注作者数据。";
+  $("followingAuthorList").innerHTML = authors.map((author) => `
+    <label class="selection-item">
+      <input type="checkbox" class="following-author-checkbox" value="${escapeHtml(author.authorUid)}" ${selected.has(author.authorUid) ? "checked" : ""} />
+      <span class="selection-main">
+        <div class="selection-title">${escapeHtml(author.authorName || "未命名作者")}</div>
+        <div class="selection-subtitle">UID: ${escapeHtml(author.authorUid)} · 共 ${author.total} 条 · 待下载 ${author.pending} 条 · 已下载 ${author.downloaded} 条</div>
+      </span>
+    </label>
+  `).join("");
+  for (const node of document.querySelectorAll(".following-author-checkbox")) {
+    node.addEventListener("change", async () => {
+      const values = [...document.querySelectorAll(".following-author-checkbox:checked")].map((input) => input.value);
+      await setSelectedFollowingAuthors(values);
+      renderFollowingAuthors(authors, values);
+    });
+  }
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;",
@@ -384,6 +476,9 @@ function escapeHtml(value) {
 
 async function render() {
   const state = await summarize();
+  const items = await getAll("items");
+  const followingAuthors = buildFollowingAuthors(items);
+  const selectedFollowingAuthors = await getSelectedFollowingAuthors();
   const storedTarget = await getStoredDownloadTarget();
   const folderRecord = storedTarget?.permission === "granted"
     ? await getCachedDownloadRecord(storedTarget)
@@ -442,6 +537,7 @@ async function render() {
       `当前勾选该选项时，下载会直接写入这个文件夹，不会出现在浏览器下载记录里。`,
     ].join("<br>")
     : "当前未记住可用文件夹；先点击“选择文件夹”授权目录，否则无法以无浏览器下载记录的方式开始下载。";
+  renderFollowingAuthors(followingAuthors, selectedFollowingAuthors);
   updateDownloadBatchProgress();
   renderLogs(state.logs);
   updateButtons();
@@ -455,6 +551,8 @@ function updateButtons() {
   $("favoriteBtn").disabled = running;
   $("auditBtn").disabled = running;
   $("downloadBtn").disabled = downloadRunning;
+  $("downloadBookmarkedBtn").disabled = downloadRunning;
+  $("downloadFollowingBtn").disabled = downloadRunning;
   $("pauseDownloadBtn").disabled = !downloadRunning;
   $("stopBtn").disabled = !running;
 }
@@ -927,10 +1025,12 @@ async function downloadOne(item, rootHandle, config) {
   });
 }
 
-async function runDownloadBatch() {
+async function runDownloadBatch(scope = "favorited") {
   if (downloadRunning) return;
   downloadRunning = true;
   downloadPauseRequested = false;
+  currentDownloadScope = scope;
+  const scopeDef = getDownloadScopeDefinition(scope);
   downloadBatchState = {
     total: 0,
     completed: 0,
@@ -942,7 +1042,7 @@ async function runDownloadBatch() {
   setGlobalStatus("下载中");
   setDownloadStatus("准备下载");
   updateDownloadBatchProgress();
-  logLine("已点击开始下载，正在检查可下载项目");
+  logLine(scopeDef.startText, { type: "download_scope_start", scope: scopeDef.key });
   try {
     await saveCurrentConfig();
     const config = await loadConfig();
@@ -972,8 +1072,9 @@ async function runDownloadBatch() {
       const recovered = await recoverDownloadedItemsFromLogs();
       if (recovered) logLine(`已从日志恢复 ${recovered} 条下载完成记录`, { type: "download_recovered", count: recovered });
     }
+    const selectedFollowingAuthors = scope === "following" ? await getSelectedFollowingAuthors() : [];
     const items = (await getAll("items"))
-      .filter((item) => ["favorited", "already_favorited"].includes(item.status) && item.downloadStatus !== "downloaded")
+      .filter((item) => scopeDef.isEligible(item, { selectedFollowingAuthors }))
       .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0))
       .slice(0, Number(config.batchSize || DEFAULT_CONFIG.batchSize));
     if (!items.length) {
@@ -981,7 +1082,7 @@ async function runDownloadBatch() {
       setGlobalStatus("空闲");
       setDownloadStatus("空闲");
       updateDownloadBatchProgress();
-      logLine("没有待下载的已收藏项目");
+      logLine(scopeDef.emptyText, { type: "download_scope_empty", scope: scopeDef.key });
       return;
     }
     downloadBatchState.total = items.length;
@@ -997,10 +1098,11 @@ async function runDownloadBatch() {
     updateDownloadBatchProgress();
     await persistDownloadArtifacts(rootHandle, downloadBatchState);
     logLine(rootHandle.kind === "downloads"
-      ? `开始下载批次：${items.length} 条，保存到浏览器下载目录`
-      : `开始下载批次：${items.length} 条，保存到文件夹 ${rootHandle.label || "已授权目录"}`, {
+      ? `开始下载${scopeDef.label}批次：${items.length} 条，保存到浏览器下载目录`
+      : `开始下载${scopeDef.label}批次：${items.length} 条，保存到文件夹 ${rootHandle.label || "已授权目录"}`, {
         type: "download_batch_started",
         count: items.length,
+        scope: scopeDef.key,
         targetKind: rootHandle.kind,
         folderName: rootHandle.label || "",
         preferBestQuality: Boolean(config.downloadPreferBestQuality),
@@ -1009,10 +1111,11 @@ async function runDownloadBatch() {
     for (const item of items) {
       if (downloadPauseRequested) {
         downloadBatchState.phase = "已暂停";
-        logLine(`下载已暂停：完成 ${downloaded}/${items.length} 条`, {
+        logLine(`${scopeDef.label}下载已暂停：完成 ${downloaded}/${items.length} 条`, {
           type: "download_paused",
           completed: downloaded,
           total: items.length,
+          scope: scopeDef.key,
         });
         break;
       }
@@ -1023,11 +1126,12 @@ async function runDownloadBatch() {
         await persistDownloadArtifacts(rootHandle, downloadBatchState);
       } catch (error) {
         await saveItem(patchItem(item, { downloadStatus: "failed", lastError: `下载失败：${error.message}` }));
-        logLine(`下载失败：#${item.index} ${item.awemeId} ${error.message}`, {
+        logLine(`${scopeDef.label}下载失败：#${item.index} ${item.awemeId} ${error.message}`, {
           type: "download_failed",
           awemeId: item.awemeId,
           index: item.index,
           error: error.message,
+          scope: scopeDef.key,
         });
         await persistDownloadArtifacts(rootHandle, downloadBatchState);
       }
@@ -1038,9 +1142,10 @@ async function runDownloadBatch() {
     if (!downloadPauseRequested) {
       downloadBatchState.phase = "已完成";
       await persistDownloadArtifacts(rootHandle, downloadBatchState);
-      logLine(`下载批次结束：完成 ${downloaded} 条`, {
+      logLine(`${scopeDef.label}下载批次结束：完成 ${downloaded} 条`, {
         type: "download_batch_finished",
         completed: downloaded,
+        scope: scopeDef.key,
       });
     }
   } catch (error) {
@@ -1120,7 +1225,28 @@ $("auditBtn").addEventListener("click", async () => {
 });
 
 $("downloadBtn").addEventListener("click", async () => {
-  await runDownloadBatch();
+  await runDownloadBatch("favorited");
+});
+
+$("downloadBookmarkedBtn").addEventListener("click", async () => {
+  await runDownloadBatch("bookmarked");
+});
+
+$("downloadFollowingBtn").addEventListener("click", async () => {
+  await runDownloadBatch("following");
+});
+
+$("selectAllFollowingBtn").addEventListener("click", async () => {
+  const authors = buildFollowingAuthors(await getAll("items"));
+  const values = authors.map((author) => author.authorUid);
+  await setSelectedFollowingAuthors(values);
+  renderFollowingAuthors(authors, values);
+});
+
+$("clearFollowingSelectionBtn").addEventListener("click", async () => {
+  const authors = buildFollowingAuthors(await getAll("items"));
+  await setSelectedFollowingAuthors([]);
+  renderFollowingAuthors(authors, []);
 });
 
 $("pauseDownloadBtn").addEventListener("click", () => {
