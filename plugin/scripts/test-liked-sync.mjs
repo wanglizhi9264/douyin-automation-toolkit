@@ -52,6 +52,26 @@ assert.doesNotMatch(
   "syncNextLikedPage must not be nested inside downloadOne",
 );
 vm.runInThisContext(source, { filename: "injected.js" });
+assert.match(
+  sidebarSource,
+  /async function runLikedDownloadFlow[\s\S]*while \(!scanState\.finished && !downloadPauseRequested\)/,
+  "liked downloads must keep scanning until the terminal cursor",
+);
+assert.match(
+  sidebarSource,
+  /if \(scope === "liked"\) \{\s*await runLikedDownloadFlow\(/,
+  "liked download button must route to the streaming flow",
+);
+assert.match(
+  source,
+  /type === "DOWNLOAD_TO_FOLDER"[\s\S]*downloadToFolderOnce\(/,
+  "folder downloads must use the single-request implementation",
+);
+assert.match(
+  sidebarSource,
+  /rootHandle\.kind === "filesystem"[\s\S]*options: \{ expected: "video" \}[\s\S]*if \(!downloadedDirect\) try/,
+  "filesystem video downloads must not precheck before the write request",
+);
 const onMessage = listeners.get("message");
 assert.equal(typeof onMessage, "function");
 
@@ -74,7 +94,7 @@ await onMessage({
     source: "douyin-toolkit-content",
     requestId: "liked-1",
     type: "FETCH_LIKED_PAGE",
-    payload: { secUid: "sec-test", maxCursor: 123, count: 20 },
+    payload: { secUid: "sec-test", maxCursor: 123, minCursor: 7, count: 18 },
   },
 });
 const likedReply = replies.find((entry) => entry.message.requestId === "liked-1");
@@ -83,5 +103,6 @@ assert.equal(likedReply.message.payload.awemeList.length, 1);
 assert.equal(likedReply.message.payload.maxCursor, 456);
 assert.match(requests.at(-1), /sec_user_id=sec-test/);
 assert.match(requests.at(-1), /max_cursor=123/);
+assert.match(requests.at(-1), /min_cursor=7/);
 
 console.log("OK: liked-list page request runtime test passed");

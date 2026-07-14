@@ -3,6 +3,16 @@ import { addLog, getAll, getConfig, putItems, setConfig } from "../shared/db.js"
 import { DEFAULT_CONFIG, importProgress, loadConfig, saveConfig, summarize } from "../shared/state.js";
 import { describeVideoCandidate, normalizeAweme, pickVideoCandidates, pickVideoUrl } from "../shared/api.js";
 import { chooseDownloadTarget, downloadUrl, getStoredDownloadTarget, readTextFile, writeFile } from "../shared/download.js";
+import {
+  advanceLikedScanState,
+  createLikedScanState,
+  LIKED_PAGE_MAX_RETRIES,
+  LIKED_PAGE_MIN_INTERVAL_MS,
+  LIKED_PAGE_SIZE,
+  likedRetryDelayMs,
+  normalizeLikedPageItems,
+  parseLikedProfile,
+} from "../shared/liked-sync.js";
 
 const $ = (id) => document.getElementById(id);
 let configHydrated = false;
@@ -500,12 +510,25 @@ function fillConfig(config) {
 }
 
 function renderLogs(logs) {
+const beijingTimeFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Shanghai",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+function formatLogTime(value) {
+  const date = new Date(value || "");
+  return Number.isNaN(date.getTime()) ? "" : beijingTimeFormatter.format(date);
+}
+
   const latest = logs[logs.length - 1];
   $("latestLog").innerHTML = latest
-    ? `<span style="color:#8e8e93">${escapeHtml((latest.createdAt || "").slice(11, 19))}</span> ${escapeHtml(latest.text)}`
+    ? `<span style="color:#8e8e93">${escapeHtml(formatLogTime(latest.createdAt))}</span> ${escapeHtml(latest.text)}`
     : "暂无日志";
   $("log").innerHTML = [...logs].reverse().map((entry) => {
-    const time = (entry.createdAt || "").slice(11, 19);
+    const time = formatLogTime(entry.createdAt);
     return `<div><span style="color:#8e8e93">${escapeHtml(time)}</span> ${escapeHtml(entry.text)}</div>`;
   }).join("");
   $("log").scrollTop = 0;
@@ -1017,6 +1040,135 @@ async function syncNextLikedPage(config) {
   return syncedItems.length;
 }
 
+let lastLikedPageRequestAt = 0;
+
+async function startLikedScan() {
+  const profileResult = await sendPageRequest("GET_SELF_PROFILE", {}, 30000);
+  if (!profileResult?.ok) {
+    throw new Error("\u559c\u6b22\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u65e0\u6cd5\u8bfb\u53d6\u5f53\u524d\u767b\u5f55\u7528\u6237\uff0c" + resultError(profileResult));
+  }
+  const profile = parseLikedProfile(profileResult);
+  if (!profile.secUid) {
+    throw new Error("\u559c\u6b22\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u5f53\u524d\u7528\u6237\u7f3a\u5c11 sec_uid");
+  }
+  const state = createLikedScanState(profile);
+  await Promise.all([
+    setConfig("likedSyncCursor", 0),
+    setConfig("likedSyncMinCursor", 0),
+    setConfig("likedSyncHasMore", true),
+    setConfig("likedSyncChecked", 0),
+    setConfig("likedSyncExpectedTotal", profile.expectedTotal),
+    setConfig("likedSyncProfileUid", profile.uid || profile.secUid),
+  ]);
+  logLine(
+    "\u5f00\u59cb\u4ece\u7b2c 1 \u9875\u68c0\u67e5\u559c\u6b22\u5217\u8868"
+      + (profile.expectedTotal ? "\uff0c\u6296\u97f3\u663e\u793a\u603b\u6570 " + profile.expectedTotal : ""),
+    {
+      type: "liked_scan_started",
+      expectedTotal: profile.expectedTotal,
+      uid: profile.uid,
+    },
+  );
+  return state;
+}
+
+async function waitForLikedPageSlot() {
+  const elapsed = Date.now() - lastLikedPageRequestAt;
+  if (elapsed < LIKED_PAGE_MIN_INTERVAL_MS) {
+    await sleep(LIKED_PAGE_MIN_INTERVAL_MS - elapsed);
+  }
+}
+
+async function requestLikedPageWithRetry(state) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= LIKED_PAGE_MAX_RETRIES; attempt += 1) {
+    try {
+      while (navigator.onLine === false) {
+        await sleep(1000);
+      }
+      await waitForLikedPageSlot();
+      lastLikedPageRequestAt = Date.now();
+      const page = await sendPageRequest("FETCH_LIKED_PAGE", {
+        secUid: state.secUid,
+        maxCursor: state.maxCursor,
+        minCursor: state.minCursor,
+        count: LIKED_PAGE_SIZE,
+      }, 60000);
+      if (!page?.ok || !Array.isArray(page.awemeList)) {
+        throw new Error(resultError(page));
+      }
+      advanceLikedScanState(state, page, 0);
+      return page;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= LIKED_PAGE_MAX_RETRIES) break;
+      const delayMs = likedRetryDelayMs(attempt);
+      logLine(
+        "\u559c\u6b22\u5217\u8868\u7b2c " + (state.page + 1) + " \u9875\u8bf7\u6c42\u5931\u8d25\uff0c"
+          + Math.round(delayMs / 1000) + " \u79d2\u540e\u91cd\u8bd5\uff08" + attempt + "/" + LIKED_PAGE_MAX_RETRIES + "\uff09\uff1a"
+          + (error?.message || String(error)),
+        {
+          type: "liked_page_retry",
+          page: state.page + 1,
+          attempt,
+          maxCursor: state.maxCursor,
+          minCursor: state.minCursor,
+          error: error?.message || String(error),
+        },
+      );
+      await sleep(delayMs);
+    }
+  }
+  throw new Error(
+    "\u559c\u6b22\u5217\u8868\u7b2c " + (state.page + 1) + " \u9875\u8fde\u7eed\u5931\u8d25 "
+      + LIKED_PAGE_MAX_RETRIES + " \u6b21\uff0c\u6e38\u6807 max=" + state.maxCursor + " min=" + state.minCursor + "\uff1a"
+      + (lastError?.message || String(lastError)),
+  );
+}
+
+async function scanNextLikedPage(scanState) {
+  const page = await requestLikedPageWithRetry(scanState);
+  const existingItems = await getAll("items");
+  const normalized = normalizeLikedPageItems(page.awemeList, existingItems, scanState.seenIds);
+  if (normalized.items.length) await putItems(normalized.items);
+  const nextState = advanceLikedScanState(scanState, page, normalized.items.length);
+  await Promise.all([
+    setConfig("likedSyncCursor", nextState.maxCursor),
+    setConfig("likedSyncMinCursor", nextState.minCursor),
+    setConfig("likedSyncHasMore", nextState.hasMore),
+    setConfig("likedSyncChecked", nextState.checked),
+    setConfig("likedSyncExpectedTotal", nextState.expectedTotal),
+    setConfig("likedSyncUpdatedAt", new Date().toISOString()),
+  ]);
+  logLine(
+    "\u68c0\u67e5\u559c\u6b22\u5217\u8868\uff1a\u7b2c " + nextState.page + " \u9875\uff0c\u672c\u9875 "
+      + page.awemeList.length + " \u6761\uff0c\u53ef\u4e0b\u8f7d\u89c6\u9891 " + normalized.items.length
+      + " \u6761\uff0c\u7d2f\u8ba1\u68c0\u67e5\u5230 " + nextState.checked
+      + (nextState.expectedTotal ? "/" + nextState.expectedTotal : "")
+      + (normalized.skippedImages ? "\uff0c\u8df3\u8fc7\u56fe\u6587 " + normalized.skippedImages : ""),
+    {
+      type: "liked_page_checked",
+      page: nextState.page,
+      pageItems: page.awemeList.length,
+      videoItems: normalized.items.length,
+      checked: nextState.checked,
+      expectedTotal: nextState.expectedTotal,
+      skippedImages: normalized.skippedImages,
+      skippedDuplicates: normalized.skippedDuplicates,
+      maxCursor: nextState.maxCursor,
+      minCursor: nextState.minCursor,
+      hasMore: nextState.hasMore,
+      finished: nextState.finished,
+      fullScan: nextState.fullScan,
+    },
+  );
+  return {
+    state: nextState,
+    items: normalized.items,
+  };
+}
+
+
 async function downloadOne(item, rootHandle, config) {
 
   downloadBatchState.inspected = Math.max(downloadBatchState.inspected, downloadBatchState.currentOrder || 0);
@@ -1067,7 +1219,71 @@ async function downloadOne(item, rootHandle, config) {
   const manifestPath = `data/.appdata/manifests/${base}.json`;
   let videoPrecheck = null;
   let selectedCandidateRank = 1;
-  try {
+  let downloadedDirect = false;
+  if (rootHandle.kind === "filesystem") {
+    const primaryCandidates = rankedCandidates.length
+      ? rankedCandidates
+      : [{ ...candidate, url: videoUrl }];
+    const directCandidates = [...primaryCandidates, fallbackCandidate]
+      .filter((entry) => entry?.url)
+      .filter((entry, index, list) => list.findIndex((other) => other.url === entry.url) === index);
+    const directErrors = [];
+    const directLimit = config.downloadPreferBestQuality ? Math.min(directCandidates.length, 4) : 1;
+    for (let index = 0; index < directLimit; index += 1) {
+      candidate = directCandidates[index];
+      videoUrl = candidate.url;
+      downloadBatchState.currentResolution = describeVideoCandidate(candidate);
+      updateDownloadBatchProgress();
+      try {
+        const result = await sendPageRequest("DOWNLOAD_TO_FOLDER", {
+          rootHandle: rootHandle.handle,
+          relativePath: videoPath,
+          url: videoUrl,
+          options: { expected: "video" },
+        }, 120000);
+        videoPrecheck = result.precheck || {
+          ok: true,
+          contentType: result.contentType || "video/mp4",
+          contentLength: result.size || 0,
+          sizeLabel: result.size ? (result.size / 1024 / 1024).toFixed(1) + "MB" : "",
+        };
+        selectedCandidateRank = index + 1;
+        downloadedDirect = true;
+        logLine(
+          "\u89c6\u9891\u4e0b\u8f7d\u5e76\u6821\u9a8c\u901a\u8fc7\uff1a#" + item.index + " " + item.awemeId + " "
+            + (videoPrecheck.sizeLabel || "") + " " + describeVideoCandidate(candidate),
+          {
+            type: "download_stream_validated",
+            awemeId: item.awemeId,
+            index: item.index,
+            candidateRank: selectedCandidateRank,
+            contentType: videoPrecheck.contentType || "",
+            contentLength: videoPrecheck.contentLength || 0,
+            quality: candidate,
+          },
+        );
+        break;
+      } catch (error) {
+        directErrors.push("#" + (index + 1) + " " + describeVideoCandidate(candidate) + " " + error.message);
+        logLine(
+          "\u89c6\u9891\u4e0b\u8f7d\u5019\u9009\u5931\u8d25\uff1a#" + item.index + " " + item.awemeId
+            + " \u5019\u9009 " + (index + 1) + " " + describeVideoCandidate(candidate) + " " + error.message,
+          {
+            type: "download_stream_candidate_failed",
+            awemeId: item.awemeId,
+            index: item.index,
+            candidateRank: index + 1,
+            error: error.message,
+            quality: candidate,
+          },
+        );
+      }
+    }
+    if (!downloadedDirect) {
+      throw new Error("\u6ca1\u6709\u53ef\u7528\u7684\u89c6\u9891\u5019\u9009\uff1a" + directErrors.join(" | "));
+    }
+  }
+  if (!downloadedDirect) try {
     const selected = await chooseDownloadCandidate(item, rankedCandidates.length ? rankedCandidates : [{ ...candidate, url: videoUrl }], {
       allowFallback: Boolean(config.downloadPreferBestQuality),
     });
@@ -1080,7 +1296,7 @@ async function downloadOne(item, rootHandle, config) {
         rootHandle: rootHandle.handle,
         relativePath: videoPath,
         url: videoUrl,
-        options: { expected: "video" },
+        options: { expected: "video", precheck: videoPrecheck },
       }, 120000);
     } else {
       logLine("\u63d0\u4ea4 Chrome \u89c6\u9891\u4e0b\u8f7d\uff1a" + videoPath, {
@@ -1126,7 +1342,7 @@ async function downloadOne(item, rootHandle, config) {
         rootHandle: rootHandle.handle,
         relativePath: videoPath,
         url: videoUrl,
-        options: { expected: "video" },
+        options: { expected: "video", precheck: fallbackPrecheck },
       }, 120000);
     } else {
       logLine("\u63d0\u4ea4 Chrome \u56de\u9000\u89c6\u9891\u4e0b\u8f7d\uff1a" + videoPath, {
@@ -1140,7 +1356,7 @@ async function downloadOne(item, rootHandle, config) {
   }
 
   if (config.downloadCovers && coverUrl) {
-    await sendPageRequest("PRECHECK_URL", {
+    const coverPrecheck = await sendPageRequest("PRECHECK_URL", {
       url: coverUrl,
       options: { expected: "image" },
     }, 30000);
@@ -1149,7 +1365,7 @@ async function downloadOne(item, rootHandle, config) {
         rootHandle: rootHandle.handle,
         relativePath: coverPath,
         url: coverUrl,
-        options: { expected: "image" },
+        options: { expected: "image", precheck: coverPrecheck },
       }, 120000);
     } else {
       await downloadUrl(rootHandle, coverPath, coverUrl);
@@ -1217,6 +1433,156 @@ async function downloadOne(item, rootHandle, config) {
   });
 }
 
+async function runLikedDownloadFlow(rootHandle, config, scopeDef) {
+  if (rootHandle.kind === "downloads") {
+    const uiResult = await sendRuntimeMessage({ type: "SET_DOWNLOAD_UI", enabled: false });
+    if (!uiResult?.ok) {
+      logLine("\u9690\u85cf\u6d4f\u89c8\u5668\u4e0b\u8f7d\u63d0\u793a\u5931\u8d25\uff1a" + (uiResult?.error || "unknown"));
+    }
+  }
+
+  let scanState = await startLikedScan();
+  downloadBatchState.total = scanState.expectedTotal;
+  downloadBatchState.completed = 0;
+  downloadBatchState.inspected = 0;
+  downloadBatchState.phase = "\u68c0\u67e5\u559c\u6b22\u5217\u8868";
+  setDownloadStatus("\u68c0\u67e5\u4e2d");
+  updateDownloadBatchProgress();
+  await persistDownloadArtifacts(rootHandle, downloadBatchState);
+  logLine(
+    "\u5f00\u59cb\u68c0\u67e5\u5e76\u4e0b\u8f7d\u559c\u6b22\u89c6\u9891\uff0c\u5df2\u4e0b\u8f7d\u4f5c\u54c1\u4f1a\u81ea\u52a8\u8df3\u8fc7",
+    {
+      type: "liked_download_stream_started",
+      expectedTotal: scanState.expectedTotal,
+      targetKind: rootHandle.kind,
+      folderName: rootHandle.label || "",
+      preferBestQuality: Boolean(config.downloadPreferBestQuality),
+    },
+  );
+
+  let downloaded = 0;
+  let failed = 0;
+  let attempted = 0;
+  let pendingFound = 0;
+  while (!scanState.finished && !downloadPauseRequested) {
+    downloadBatchState.phase = "\u68c0\u67e5\u559c\u6b22\u5217\u8868";
+    setDownloadStatus("\u68c0\u67e5\u4e2d");
+    updateDownloadBatchProgress();
+    const pageResult = await scanNextLikedPage(scanState);
+    scanState = pageResult.state;
+    downloadBatchState.inspected = scanState.checked;
+    downloadBatchState.total = Math.max(scanState.expectedTotal, scanState.checked);
+    updateDownloadBatchProgress();
+
+    if (scanState.finished && !scanState.fullScan) {
+      throw new Error(
+        "\u559c\u6b22\u5217\u8868\u6e38\u6807\u5f02\u5e38\u7ed3\u675f\uff1amax=" + scanState.maxCursor
+          + "\uff0chas_more=" + scanState.hasMore + "\uff0c\u5df2\u505c\u6b62\u4ee5\u907f\u514d\u8bef\u5224\u4e3a\u4e0b\u8f7d\u5b8c\u6210",
+      );
+    }
+    if (scanState.finished && scanState.expectedTotal > 0 && scanState.rawChecked === 0) {
+      throw new Error(
+        "\u6296\u97f3\u663e\u793a\u559c\u6b22 " + scanState.expectedTotal
+          + " \u6761\uff0c\u4f46\u559c\u6b22\u5217\u8868\u63a5\u53e3\u8fd4\u56de 0 \u6761\uff1b\u53ef\u80fd\u9700\u8981\u9a8c\u8bc1\u7801\u6216\u767b\u5f55\u72b6\u6001\u5df2\u5931\u6548",
+      );
+    }
+
+    const runnableItems = pageResult.items
+      .filter((item) => scopeDef.isEligible(item))
+      .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0));
+    pendingFound += runnableItems.length;
+    for (const item of runnableItems) {
+      if (downloadPauseRequested) break;
+      attempted += 1;
+      downloadBatchState.currentOrder = attempted;
+      downloadBatchState.currentIndex = item.index;
+      downloadBatchState.currentAwemeId = item.awemeId;
+      downloadBatchState.phase = "\u4e0b\u8f7d\u4e2d";
+      setDownloadStatus("\u4e0b\u8f7d\u4e2d");
+      updateDownloadBatchProgress();
+      try {
+        await downloadOne(item, rootHandle, config);
+        downloaded += 1;
+        downloadBatchState.completed = downloaded;
+      } catch (error) {
+        failed += 1;
+        await saveItem(patchItem(item, {
+          downloadStatus: "failed",
+          lastError: "\u4e0b\u8f7d\u5931\u8d25\uff1a" + (error?.message || String(error)),
+        }));
+        logLine(
+          "\u559c\u6b22\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\uff1a#" + item.index + " " + item.awemeId + " "
+            + (error?.message || String(error)),
+          {
+            type: "download_failed",
+            awemeId: item.awemeId,
+            index: item.index,
+            error: error?.message || String(error),
+            scope: "liked",
+          },
+        );
+      }
+      await persistDownloadArtifacts(rootHandle, downloadBatchState);
+      updateDownloadBatchProgress();
+      await render();
+      await sleep(randomDelay(config));
+    }
+  }
+
+  if (downloadPauseRequested) {
+    downloadBatchState.phase = "\u5df2\u6682\u505c";
+    await persistDownloadArtifacts(rootHandle, downloadBatchState);
+    logLine(
+      "\u559c\u6b22\u89c6\u9891\u4e0b\u8f7d\u5df2\u6682\u505c\uff1a\u68c0\u67e5\u5230 " + scanState.checked
+        + "\uff0c\u672c\u6b21\u4e0b\u8f7d " + downloaded + "\uff0c\u5931\u8d25 " + failed,
+      {
+        type: "liked_download_paused",
+        checked: scanState.checked,
+        downloaded,
+        failed,
+      },
+    );
+    return;
+  }
+
+  const allItems = await getAll("items");
+  const likedItems = allItems.filter((item) => ["liked", "favorite_api"].includes(item.source));
+  const alreadyDownloaded = likedItems.filter((item) => item.downloadStatus === "downloaded").length;
+  downloadBatchState.phase = "\u5df2\u5b8c\u6210";
+  await Promise.all([
+    setConfig("likedSyncCompletedAt", new Date().toISOString()),
+    setConfig("likedSyncCompletedCount", scanState.checked),
+  ]);
+  await persistDownloadArtifacts(rootHandle, downloadBatchState);
+  if (!pendingFound) {
+    logLine(
+      "\u559c\u6b22\u5217\u8868\u83b7\u53d6\u6210\u529f\uff1a\u68c0\u67e5\u5230 " + scanState.checked
+        + " \u4e2a\u89c6\u9891\uff0c\u6ca1\u6709\u65b0\u7684\u5f85\u4e0b\u8f7d\u9879\u76ee\uff0c\u672c\u5730\u5df2\u4e0b\u8f7d " + alreadyDownloaded,
+      {
+        type: "liked_scan_no_new_downloads",
+        checked: scanState.checked,
+        alreadyDownloaded,
+      },
+    );
+  }
+  logLine(
+    "\u559c\u6b22\u89c6\u9891\u4efb\u52a1\u5b8c\u6210\uff1a\u68c0\u67e5\u5230 " + scanState.checked
+      + "\uff0c\u672c\u6b21\u4e0b\u8f7d " + downloaded + "\uff0c\u5931\u8d25 " + failed
+      + "\uff0c\u672c\u5730\u5df2\u4e0b\u8f7d " + alreadyDownloaded,
+    {
+      type: "liked_download_stream_finished",
+      checked: scanState.checked,
+      rawChecked: scanState.rawChecked,
+      downloaded,
+      failed,
+      alreadyDownloaded,
+      expectedTotal: scanState.expectedTotal,
+      pages: scanState.page,
+    },
+  );
+}
+
+
 async function runDownloadBatch(scope = "liked") {
   if (downloadRunning) return;
   downloadRunning = true;
@@ -1267,6 +1633,11 @@ async function runDownloadBatch(scope = "liked") {
       const recovered = await recoverDownloadedItemsFromLogs();
       if (recovered) logLine(`已从日志恢复 ${recovered} 条下载完成记录`, { type: "download_recovered", count: recovered });
     }
+    if (scope === "liked") {
+      await runLikedDownloadFlow(rootHandle, config, scopeDef);
+      return;
+    }
+
     const selectedFollowingAuthors = scope === "following" ? await getSelectedFollowingAuthors() : [];
     let allStoredItems = await getAll("items");
     let items = allStoredItems
