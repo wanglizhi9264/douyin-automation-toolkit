@@ -1,10 +1,10 @@
 {
   "name": "douyin-toolkit-extension",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node scripts/check-extension.mjs && node scripts/test-content-bridge.mjs",
+    "check": "node scripts/check-extension.mjs && node scripts/test-content-bridge.mjs && node scripts/test-liked-sync.mjs",
     "zip": "node scripts/zip-extension.mjs"
   }
 }

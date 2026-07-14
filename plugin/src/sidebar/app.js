@@ -1,7 +1,7 @@
 import { sendPageRequest } from "../shared/events.js";
-import { addLog, getAll, putItems } from "../shared/db.js";
+import { addLog, getAll, getConfig, putItems, setConfig } from "../shared/db.js";
 import { DEFAULT_CONFIG, importProgress, loadConfig, saveConfig, summarize } from "../shared/state.js";
-import { describeVideoCandidate, pickVideoCandidates, pickVideoUrl } from "../shared/api.js";
+import { describeVideoCandidate, normalizeAweme, pickVideoCandidates, pickVideoUrl } from "../shared/api.js";
 import { chooseDownloadTarget, downloadUrl, getStoredDownloadTarget, readTextFile, writeFile } from "../shared/download.js";
 
 const $ = (id) => document.getElementById(id);
@@ -962,6 +962,62 @@ async function chooseDownloadCandidate(item, candidates, { allowFallback = true 
 }
 
 async function downloadOne(item, rootHandle, config) {
+async function syncNextLikedPage(config) {
+  logLine("\u672c\u5730\u65e0\u5f85\u4e0b\u8f7d\u8bb0\u5f55\uff0c\u6b63\u5728\u540c\u6b65\u4e0b\u4e00\u9875\u559c\u6b22\u5217\u8868", {
+    type: "liked_sync_started",
+  });
+  const profile = await sendPageRequest("GET_SELF_PROFILE", {}, 30000);
+  if (!profile?.ok) {
+    throw new Error("\u559c\u6b22\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u65e0\u6cd5\u8bfb\u53d6\u5f53\u524d\u767b\u5f55\u7528\u6237\uff0c" + resultError(profile));
+  }
+  const user = profile?.json?.user || profile?.json?.user_info || profile?.json;
+  const secUid = user?.sec_uid || user?.secUid || user?.sec_user_id || "";
+  if (!secUid) {
+    throw new Error("\u559c\u6b22\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u5f53\u524d\u7528\u6237\u7f3a\u5c11 sec_uid");
+  }
+
+  const cursor = await getConfig("likedSyncCursor", 0);
+  const pageSize = Math.min(50, Math.max(10, Number(config.batchSize || 20)));
+  const page = await sendPageRequest("FETCH_LIKED_PAGE", {
+    secUid,
+    maxCursor: cursor,
+    count: pageSize,
+  }, 60000);
+  if (!page?.ok) {
+    throw new Error("\u559c\u6b22\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a" + resultError(page));
+  }
+
+  const existingItems = await getAll("items");
+  const existingById = new Map(existingItems.map((item) => [String(item.awemeId), item]));
+  let nextIndex = existingItems.reduce((max, item) => Math.max(max, Number(item.index ?? -1)), -1) + 1;
+  const syncedItems = page.awemeList
+    .map((aweme) => {
+      const normalized = normalizeAweme(aweme, nextIndex, "liked");
+      if (!normalized.awemeId) return null;
+      const existing = existingById.get(String(normalized.awemeId));
+      if (!existing) nextIndex += 1;
+      return {
+        ...normalized,
+        ...existing,
+        source: existing?.source || "liked",
+        videoUrl: normalized.videoUrl || existing?.videoUrl || "",
+        coverUrl: normalized.coverUrl || existing?.coverUrl || "",
+        updatedAt: new Date().toISOString(),
+      };
+    })
+    .filter(Boolean);
+  if (syncedItems.length) await putItems(syncedItems);
+  await setConfig("likedSyncCursor", page.maxCursor || 0);
+  await setConfig("likedSyncHasMore", Boolean(page.hasMore));
+  logLine("\u559c\u6b22\u5217\u8868\u540c\u6b65\u5b8c\u6210\uff1a\u672c\u9875 " + syncedItems.length + " \u6761", {
+    type: "liked_sync_finished",
+    count: syncedItems.length,
+    cursor: page.maxCursor || 0,
+    hasMore: Boolean(page.hasMore),
+  });
+  return syncedItems.length;
+}
+
   downloadBatchState.inspected = Math.max(downloadBatchState.inspected, downloadBatchState.currentOrder || 0);
   downloadBatchState.currentIndex = item.index;
   downloadBatchState.currentAwemeId = item.awemeId;
@@ -1211,11 +1267,23 @@ async function runDownloadBatch(scope = "liked") {
       if (recovered) logLine(`已从日志恢复 ${recovered} 条下载完成记录`, { type: "download_recovered", count: recovered });
     }
     const selectedFollowingAuthors = scope === "following" ? await getSelectedFollowingAuthors() : [];
-    const allStoredItems = await getAll("items");
-    const items = allStoredItems
+    let allStoredItems = await getAll("items");
+    let items = allStoredItems
       .filter((item) => scopeDef.isEligible(item, { selectedFollowingAuthors }))
       .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0))
       .slice(0, Number(config.batchSize || DEFAULT_CONFIG.batchSize));
+    if (scope === "liked" && !items.length) {
+      downloadBatchState.phase = "\u540c\u6b65\u559c\u6b22\u5217\u8868";
+      setDownloadStatus("\u540c\u6b65\u4e2d");
+      updateDownloadBatchProgress();
+      await syncNextLikedPage(config);
+      allStoredItems = await getAll("items");
+      items = allStoredItems
+        .filter((item) => scopeDef.isEligible(item, { selectedFollowingAuthors }))
+        .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0))
+        .slice(0, Number(config.batchSize || DEFAULT_CONFIG.batchSize));
+    }
+
     if (!items.length) {
       downloadBatchState.phase = "空闲";
       setGlobalStatus("空闲");
