@@ -77,10 +77,10 @@ function downloadWithChromeDownloads(options) {
           return;
         }
         if (!response?.ok) {
-          reject(new Error(response?.error || "download failed"));
+          reject(new Error((response?.error || "download failed") + " [state=" + (response?.state || "unknown") + ", id=" + (response?.downloadId ?? "none") + "]"));
           return;
         }
-        resolve(response.downloadId);
+        resolve(response);
       });
       return;
     }
@@ -89,7 +89,7 @@ function downloadWithChromeDownloads(options) {
       chrome.downloads.download(options, (downloadId) => {
         const error = chrome.runtime.lastError;
         if (error) reject(new Error(error.message));
-        else resolve(downloadId);
+        else resolve({ ok: true, downloadId, state: "queued" });
       });
       return;
     }
@@ -101,7 +101,7 @@ function downloadWithChromeDownloads(options) {
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
-    resolve(null);
+    resolve({ ok: true, downloadId: null, state: "anchor" });
   });
 }
 
@@ -148,13 +148,12 @@ export async function readTextFile(target, relativePath) {
 
 export async function downloadUrl(target, relativePath, url) {
   if (target.kind === "downloads") {
-    await downloadWithChromeDownloads({
+    return await downloadWithChromeDownloads({
       url,
       filename: relativePath,
       conflictAction: "uniquify",
       saveAs: false,
     });
-    return;
   }
 
   let response;
@@ -178,4 +177,12 @@ export async function downloadUrl(target, relativePath, url) {
   const blob = await response.blob();
   if (!blob.size) throw new Error("0 字节");
   await writeFile(target, relativePath, blob);
+  return {
+    ok: true,
+    state: "complete",
+    filename: relativePath,
+    bytesReceived: blob.size,
+    totalBytes: blob.size,
+    contentType: blob.type || response.headers.get("content-type") || "",
+  };
 }

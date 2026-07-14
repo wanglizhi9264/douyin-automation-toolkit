@@ -287,9 +287,15 @@ async function persistDownloadArtifacts(target, batchState) {
   if (target.kind !== "filesystem") return;
   const items = await getAll("items");
   const record = buildDownloadRecord(items, batchState);
+  const logs = await getAll("logs");
+  const logReport = sanitizeDiagnostic({
+    generatedAt: new Date().toISOString(),
+    logs,
+  });
   await writeFile(target, getDownloadRecordPath(), `${JSON.stringify(record, null, 2)}\n`);
   await writeFile(target, getDownloadReportPath(), buildDownloadReportHtml(record, target.label || ""));
   await writeLocalDatabaseFiles(target, items, record);
+  await writeFile(target, "data/.appdata/download-log.json", JSON.stringify(logReport, null, 2) + "\n");
   setCachedDownloadRecord(target, record);
 }
 
@@ -400,6 +406,65 @@ function logLine(text, meta = null) {
   addLog(text, "info", meta).then(render).catch(console.error);
 }
 
+function safeUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin + parsed.pathname;
+  } catch {
+    return String(url || "").slice(0, 300);
+  }
+}
+
+function sanitizeDiagnostic(value, key = "") {
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (/url/i.test(key) || /^https?:\/\//i.test(value)) return safeUrl(value);
+    return value.length > 4000 ? value.slice(0, 4000) + "...[truncated]" : value;
+  }
+  if (Array.isArray(value)) return value.map((entry) => sanitizeDiagnostic(entry, key));
+  if (typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      sanitizeDiagnostic(childValue, childKey),
+    ]));
+  }
+  return String(value);
+}
+
+async function exportDiagnosticLogs() {
+  const [logs, items] = await Promise.all([getAll("logs"), getAll("items")]);
+  const failedItems = items
+    .filter((item) => item.downloadStatus === "failed" || item.lastError)
+    .map((item) => ({
+      awemeId: item.awemeId,
+      index: item.index,
+      source: item.source,
+      downloadStatus: item.downloadStatus,
+      lastError: item.lastError,
+      updatedAt: item.updatedAt,
+    }));
+  const report = sanitizeDiagnostic({
+    exportedAt: new Date().toISOString(),
+    extensionVersion: chrome.runtime.getManifest().version,
+    page: location.href,
+    userAgent: navigator.userAgent,
+    downloadState: downloadBatchState,
+    config: configFromForm(),
+    failedItems,
+    logs,
+  });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const storedTarget = await getStoredDownloadTarget();
+  const target = storedTarget?.permission === "granted" ? storedTarget : { kind: "downloads" };
+  const path = target.kind === "filesystem" ? "data/.appdata/logs/diagnostic-" + stamp + ".json" : "douyin-toolkit-logs/diagnostic-" + stamp + ".json";
+  const result = await writeFile(
+    target,
+    path,
+    JSON.stringify(report, null, 2) + "\n",
+  );
+  logLine("\u8bca\u65ad\u65e5\u5fd7\u5df2\u5bfc\u51fa", { type: "diagnostic_logs_exported", download: result });
+}
+
 function sendRuntimeMessage(message) {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(message, (response) => {
@@ -444,6 +509,9 @@ function renderLogs(logs) {
     return `<div><span style="color:#8e8e93">${escapeHtml(time)}</span> ${escapeHtml(entry.text)}</div>`;
   }).join("");
   $("log").scrollTop = 0;
+  $("downloadTaskLatestLog").innerHTML = $("latestLog").innerHTML;
+  $("downloadTaskLog").innerHTML = $("log").innerHTML;
+  $("downloadTaskLog").scrollTop = 0;
 }
 
 function buildFollowingAuthors(items) {
@@ -899,6 +967,13 @@ async function downloadOne(item, rootHandle, config) {
   downloadBatchState.currentAwemeId = item.awemeId;
   downloadBatchState.phase = "下载中";
   await saveItem(patchItem(item, { downloadStatus: "downloading", lastError: "" }));
+  logLine("\u5f00\u59cb\u5904\u7406\u4e0b\u8f7d\uff1a#" + item.index + " " + item.awemeId, {
+    type: "download_item_started",
+    awemeId: item.awemeId,
+    index: item.index,
+    source: item.source,
+    targetKind: rootHandle.kind,
+  });
   let videoUrl = item.videoUrl || "";
   let coverUrl = item.coverUrl || "";
   let detail = null;
@@ -906,6 +981,11 @@ async function downloadOne(item, rootHandle, config) {
   let fallbackCandidate = null;
   let rankedCandidates = [];
   if (config.downloadPreferBestQuality || !videoUrl || (config.downloadCovers && !coverUrl)) {
+    logLine("\u6b63\u5728\u83b7\u53d6\u4f5c\u54c1\u8be6\u60c5\uff1a#" + item.index + " " + item.awemeId, {
+      type: "download_detail_started",
+      awemeId: item.awemeId,
+      index: item.index,
+    });
     detail = await sendPageRequest("FETCH_AWEME_DETAIL", { awemeId: item.awemeId }, 30000);
     if (!detail.ok) throw new Error(`详情获取失败：${resultError(detail)}`);
     rankedCandidates = pickVideoCandidates(detail.aweme, { preferBestQuality: config.downloadPreferBestQuality });
@@ -946,6 +1026,12 @@ async function downloadOne(item, rootHandle, config) {
         options: { expected: "video" },
       }, 120000);
     } else {
+      logLine("\u63d0\u4ea4 Chrome \u89c6\u9891\u4e0b\u8f7d\uff1a" + videoPath, {
+        type: "download_video_submitted",
+        awemeId: item.awemeId,
+        path: videoPath,
+        targetKind: rootHandle.kind,
+      });
       await downloadUrl(rootHandle, videoPath, videoUrl);
     }
   } catch (error) {
@@ -986,6 +1072,12 @@ async function downloadOne(item, rootHandle, config) {
         options: { expected: "video" },
       }, 120000);
     } else {
+      logLine("\u63d0\u4ea4 Chrome \u56de\u9000\u89c6\u9891\u4e0b\u8f7d\uff1a" + videoPath, {
+        type: "download_video_fallback_submitted",
+        awemeId: item.awemeId,
+        path: videoPath,
+        targetKind: rootHandle.kind,
+      });
       await downloadUrl(rootHandle, videoPath, videoUrl);
     }
   }
@@ -1342,6 +1434,18 @@ $("pickFolderBtn").addEventListener("click", () => {
     });
   });
 });
+$("exportLogsBtn").addEventListener("click", async () => {
+  try {
+    await exportDiagnosticLogs();
+  } catch (error) {
+    logLine("\u5bfc\u51fa\u8bca\u65ad\u65e5\u5fd7\u5931\u8d25\uff1a" + (error?.message || String(error)), {
+      type: "diagnostic_logs_export_failed",
+    });
+  }
+});
+
+$("exportTaskLogsBtn").addEventListener("click", exportDiagnosticLogs);
+
 
 for (const id of ["batchSize", "auditRecent", "minDelayMs", "maxDelayMs", "syncLikedBeforeRun", "downloadCovers", "downloadPreferBestQuality", "downloadUseSavedFolder"]) {
   $(id).addEventListener("change", saveCurrentConfig);

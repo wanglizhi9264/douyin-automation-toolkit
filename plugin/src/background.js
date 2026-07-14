@@ -52,8 +52,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     saveAs: Boolean(message.saveAs),
   }, (downloadId) => {
     const error = chrome.runtime.lastError;
-    if (error) sendResponse({ ok: false, error: error.message });
-    else sendResponse({ ok: true, downloadId });
+    if (error || downloadId == null) {
+      sendResponse({ ok: false, error: error?.message || "Chrome did not create a download" });
+      return;
+    }
+    let settled = false;
+    let timeout = null;
+    const finish = (response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      sendResponse(response);
+    };
+    const readDownload = () => {
+      chrome.downloads.search({ id: downloadId }, (items) => {
+        const searchError = chrome.runtime.lastError;
+        const item = items?.[0];
+        finish({
+          ok: !searchError && item?.state === "complete",
+          downloadId,
+          state: item?.state || "unknown",
+          error: searchError?.message || item?.error || "",
+          filename: item?.filename || message.filename,
+          bytesReceived: item?.bytesReceived || 0,
+          totalBytes: item?.totalBytes || 0,
+        });
+      });
+    };
+    const onChanged = (delta) => {
+      if (delta.id !== downloadId || !delta.state) return;
+      if (delta.state.current === "complete") readDownload();
+      if (delta.state.current === "interrupted") {
+        finish({
+          ok: false,
+          downloadId,
+          state: "interrupted",
+          error: delta.error?.current || "Chrome download interrupted",
+          filename: message.filename,
+        });
+      }
+    };
+    chrome.downloads.onChanged.addListener(onChanged);
+    timeout = setTimeout(() => {
+      finish({
+        ok: false,
+        downloadId,
+        state: "timeout",
+        error: "Timed out waiting for Chrome download (10 minutes)",
+        filename: message.filename,
+      });
+    }, 10 * 60 * 1000);
   });
 
   return true;
