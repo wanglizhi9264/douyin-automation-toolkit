@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音收藏备份助手",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "本地管理抖音喜欢列表收藏、审计和视频备份。",
   "action": {
     "default_title": "抖音收藏备份助手"
@@ -57,6 +57,7 @@
         "src/shared/state.js",
         "src/shared/api.js",
         "src/shared/download.js",
+        "src/shared/download-record.js",
         "src/shared/events.js"
       ]
     }

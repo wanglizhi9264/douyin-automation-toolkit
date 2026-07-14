@@ -5,6 +5,7 @@ import {
   normalizeLikedPageItems,
   parseLikedProfile,
 } from "../src/shared/liked-sync.js";
+import { pickVideoCandidates } from "../src/shared/api.js";
 
 const profile = parseLikedProfile({
   json: {
@@ -101,6 +102,36 @@ assert.equal(normalized.items[0].downloadStatus, "downloaded");
 assert.equal(normalized.items[0].downloadVideoPath, "data/liked/1.mp4");
 assert.equal(normalized.items[0].desc, "refreshed");
 assert.equal(normalized.items[1].downloadStatus, "not_started");
+
+const qualityCandidates = pickVideoCandidates({
+  video: {
+    bit_rate: [
+      {
+        bit_rate: 2200000,
+        is_h265: 0,
+        FPS: 30,
+        play_addr: {
+          url_list: ["https://video/1080.mp4"],
+          width: 1080,
+          height: 1920,
+          data_size: 2000000,
+        },
+      },
+      {
+        bit_rate: 1800000,
+        is_h265: 1,
+        FPS: 30,
+        play_addr: {
+          url_list: ["https://video/1440.mp4"],
+          width: 1440,
+          height: 2560,
+          data_size: 2500000,
+        },
+      },
+    ],
+  },
+}, { preferBestQuality: true });
+assert.equal(qualityCandidates[0].url, "https://video/1440.mp4");
 
 console.log("OK: liked scan state and merge tests passed");
 

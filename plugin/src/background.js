@@ -22,7 +22,9 @@ chrome.action.onClicked.addListener(() => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "OPEN_FOLDER_PICKER_TAB") {
-    chrome.tabs.create({ url: chrome.runtime.getURL("src/folder-picker/index.html") }, (tab) => {
+    const pickerUrl = new URL(chrome.runtime.getURL("src/folder-picker/index.html"));
+    if (sender.tab?.id != null) pickerUrl.searchParams.set("returnTabId", String(sender.tab.id));
+    chrome.tabs.create({ url: pickerUrl.toString() }, (tab) => {
       const error = chrome.runtime.lastError;
       if (error) sendResponse({ ok: false, error: error.message });
       else sendResponse({ ok: true, tabId: tab?.id || null });

@@ -7,11 +7,17 @@ function canUseBrowserDownloads() {
   );
 }
 
-export async function getStoredDownloadTarget() {
-  const target = await getConfig("downloadTarget", null);
+export async function resolveDownloadTargetRecord(target, { requestPermission = false } = {}) {
   if (!target?.handle) return null;
   try {
-    const permission = await target.handle.queryPermission?.({ mode: "readwrite" });
+    let permission = await target.handle.queryPermission?.({ mode: "readwrite" });
+    if (permission === "prompt" && requestPermission && target.handle.requestPermission) {
+      try {
+        permission = await target.handle.requestPermission({ mode: "readwrite" });
+      } catch {
+        permission = "prompt";
+      }
+    }
     return {
       kind: "filesystem",
       handle: target.handle,
@@ -22,6 +28,11 @@ export async function getStoredDownloadTarget() {
   } catch {
     return null;
   }
+}
+
+export async function getStoredDownloadTarget(options = {}) {
+  const target = await getConfig("downloadTarget", null);
+  return resolveDownloadTargetRecord(target, options);
 }
 
 export async function rememberDownloadTarget(handle, label = "") {
@@ -37,8 +48,9 @@ export async function clearStoredDownloadTarget() {
 }
 
 export async function chooseDownloadTarget({ preferBrowserDownloads = true, preferSavedFolder = true } = {}) {
+  let stored = null;
   if (preferSavedFolder) {
-    const stored = await getStoredDownloadTarget();
+    stored = await getStoredDownloadTarget({ requestPermission: true });
     if (stored?.permission === "granted") return stored;
   }
 
@@ -48,7 +60,10 @@ export async function chooseDownloadTarget({ preferBrowserDownloads = true, pref
 
   if (globalThis.showDirectoryPicker) {
     try {
-      const handle = await showDirectoryPicker({ mode: "readwrite" });
+      const handle = await showDirectoryPicker({
+        startIn: stored?.handle || "videos",
+        mode: "readwrite",
+      });
       await rememberDownloadTarget(handle, handle.name || "");
       return {
         kind: "filesystem",

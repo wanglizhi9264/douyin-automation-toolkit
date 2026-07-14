@@ -3,6 +3,7 @@ import { addLog, getAll, getConfig, putItems, setConfig } from "../shared/db.js"
 import { DEFAULT_CONFIG, importProgress, loadConfig, saveConfig, summarize } from "../shared/state.js";
 import { describeVideoCandidate, normalizeAweme, pickVideoCandidates, pickVideoUrl } from "../shared/api.js";
 import { chooseDownloadTarget, downloadUrl, getStoredDownloadTarget, readTextFile, writeFile } from "../shared/download.js";
+import { recoverDownloadedRecords } from "../shared/download-record.js";
 import {
   advanceLikedScanState,
   createLikedScanState,
@@ -222,13 +223,19 @@ function buildDownloadRecord(items, state) {
     items: eligibleItems.map((item) => ({
       awemeId: item.awemeId,
       index: item.index,
+      source: item.source || "liked",
       status: item.status,
       downloadStatus: item.downloadStatus || "not_started",
       desc: item.desc || "",
+      authorUid: item.authorUid || "",
       authorName: item.authorName || "",
+      createTime: item.createTime || 0,
       resolution: item.downloadQualityLabel || "",
       width: item.downloadWidth || 0,
+      height: item.downloadHeight || 0,
       bitrate: item.downloadBitrate || 0,
+      codec: item.downloadCodec || "",
+      fps: item.downloadFps || 0,
       size: item.downloadSize || 0,
       videoPath: item.downloadVideoPath || "",
       coverPath: item.downloadCoverPath || "",
@@ -295,8 +302,16 @@ function buildDownloadReportHtml(record, folderLabel = "") {
 
 async function persistDownloadArtifacts(target, batchState) {
   if (target.kind !== "filesystem") return;
-  const items = await getAll("items");
+  const [items, profileUid, profileNickname] = await Promise.all([
+    getAll("items"),
+    getConfig("likedSyncProfileUid", ""),
+    getConfig("likedSyncProfileNickname", ""),
+  ]);
   const record = buildDownloadRecord(items, batchState);
+  record.user = {
+    uid: profileUid || "",
+    nickname: profileNickname || "",
+  };
   const logs = await getAll("logs");
   const logReport = sanitizeDiagnostic({
     generatedAt: new Date().toISOString(),
@@ -374,27 +389,14 @@ async function writeLocalDatabaseFiles(target, items, record) {
   ].join("\n"));
 }
 
-async function recoverDownloadedItemsFromFolderRecord(target) {
+async function recoverDownloadedItemsFromFolderRecord(target, defaultSource = "liked") {
   if (target.kind !== "filesystem") return 0;
   const record = await getCachedDownloadRecord(target, { force: true });
   if (!record) return 0;
   const items = await getAll("items");
-  const byId = new Map((record.items || []).map((item) => [String(item.awemeId), item]));
-  const patched = items
-    .map((item) => {
-      const recordItem = byId.get(String(item.awemeId));
-      if (!recordItem || recordItem.downloadStatus !== "downloaded" || item.downloadStatus === "downloaded") return null;
-      return patchItem(item, {
-        downloadStatus: "downloaded",
-        lastError: "",
-        downloadQualityLabel: recordItem.resolution || item.downloadQualityLabel || "",
-        downloadWidth: recordItem.width || item.downloadWidth || 0,
-        downloadBitrate: recordItem.bitrate || item.downloadBitrate || 0,
-      });
-    })
-    .filter(Boolean);
-  if (patched.length) await putItems(patched);
-  return patched.length;
+  const recovered = recoverDownloadedRecords(items, record.items, { defaultSource });
+  if (recovered.length) await putItems(recovered);
+  return recovered.length;
 }
 
 async function resetDownloadStateForFreshFolder() {
@@ -494,7 +496,7 @@ function configFromForm() {
     syncLikedBeforeRun: $("syncLikedBeforeRun").checked,
     downloadCovers: $("downloadCovers").checked,
     downloadPreferBestQuality: $("downloadPreferBestQuality").checked,
-    downloadUseSavedFolder: $("downloadUseSavedFolder").checked,
+    downloadUseSavedFolder: true,
   };
 }
 
@@ -507,6 +509,7 @@ function fillConfig(config) {
   $("downloadCovers").checked = Boolean(config.downloadCovers);
   $("downloadPreferBestQuality").checked = Boolean(config.downloadPreferBestQuality);
   $("downloadUseSavedFolder").checked = Boolean(config.downloadUseSavedFolder);
+  $("downloadUseSavedFolder").disabled = true;
 }
 
 function renderLogs(logs) {
@@ -1057,6 +1060,7 @@ async function startLikedScan() {
     setConfig("likedSyncMinCursor", 0),
     setConfig("likedSyncHasMore", true),
     setConfig("likedSyncChecked", 0),
+    setConfig("likedSyncProfileNickname", profile.nickname || ""),
     setConfig("likedSyncExpectedTotal", profile.expectedTotal),
     setConfig("likedSyncProfileUid", profile.uid || profile.secUid),
   ]);
@@ -1356,18 +1360,18 @@ async function downloadOne(item, rootHandle, config) {
   }
 
   if (config.downloadCovers && coverUrl) {
-    const coverPrecheck = await sendPageRequest("PRECHECK_URL", {
-      url: coverUrl,
-      options: { expected: "image" },
-    }, 30000);
     if (rootHandle.kind === "filesystem") {
       await sendPageRequest("DOWNLOAD_TO_FOLDER", {
         rootHandle: rootHandle.handle,
         relativePath: coverPath,
         url: coverUrl,
-        options: { expected: "image", precheck: coverPrecheck },
+        options: { expected: "image" },
       }, 120000);
     } else {
+      await sendPageRequest("PRECHECK_URL", {
+        url: coverUrl,
+        options: { expected: "image" },
+      }, 30000);
       await downloadUrl(rootHandle, coverPath, coverUrl);
     }
   }
@@ -1433,7 +1437,7 @@ async function downloadOne(item, rootHandle, config) {
   });
 }
 
-async function runLikedDownloadFlow(rootHandle, config, scopeDef) {
+async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord = null) {
   if (rootHandle.kind === "downloads") {
     const uiResult = await sendRuntimeMessage({ type: "SET_DOWNLOAD_UI", enabled: false });
     if (!uiResult?.ok) {
@@ -1442,6 +1446,26 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef) {
   }
 
   let scanState = await startLikedScan();
+  const currentUserId = String(scanState.uid || scanState.secUid || "");
+  const folderUserId = String(folderRecord?.user?.uid || "");
+  if (folderUserId && currentUserId && folderUserId !== currentUserId) {
+    throw new Error(
+      "\u8be5\u6587\u4ef6\u5939\u5c5e\u4e8e\u53e6\u4e00\u4e2a\u6296\u97f3\u8d26\u53f7"
+        + (folderRecord?.user?.nickname ? "\uff1a" + folderRecord.user.nickname : "")
+        + "\uff0c\u5df2\u505c\u6b62\u5199\u5165\uff1b\u8bf7\u4e3a\u5f53\u524d\u8d26\u53f7\u9009\u62e9\u65b0\u6587\u4ef6\u5939",
+    );
+  }
+  const recoveredFromFolder = await recoverDownloadedItemsFromFolderRecord(rootHandle, "liked");
+  if (recoveredFromFolder) {
+    logLine(
+      "\u5df2\u4ece\u6587\u4ef6\u5939\u8bb0\u5f55\u6062\u590d " + recoveredFromFolder + " \u6761\u5df2\u4e0b\u8f7d\u8bb0\u5f55",
+      {
+        type: "download_recovered_from_folder",
+        count: recoveredFromFolder,
+      },
+    );
+  }
+
   downloadBatchState.total = scanState.expectedTotal;
   downloadBatchState.completed = 0;
   downloadBatchState.inspected = 0;
@@ -1464,6 +1488,7 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef) {
   let failed = 0;
   let attempted = 0;
   let pendingFound = 0;
+  let consecutiveFailures = 0;
   while (!scanState.finished && !downloadPauseRequested) {
     downloadBatchState.phase = "\u68c0\u67e5\u559c\u6b22\u5217\u8868";
     setDownloadStatus("\u68c0\u67e5\u4e2d");
@@ -1503,9 +1528,11 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef) {
       try {
         await downloadOne(item, rootHandle, config);
         downloaded += 1;
+        consecutiveFailures = 0;
         downloadBatchState.completed = downloaded;
       } catch (error) {
         failed += 1;
+        consecutiveFailures += 1;
         await saveItem(patchItem(item, {
           downloadStatus: "failed",
           lastError: "\u4e0b\u8f7d\u5931\u8d25\uff1a" + (error?.message || String(error)),
@@ -1525,6 +1552,9 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef) {
       await persistDownloadArtifacts(rootHandle, downloadBatchState);
       updateDownloadBatchProgress();
       await render();
+      if (consecutiveFailures >= 8) {
+        throw new Error("\u8fde\u7eed 8 \u4e2a\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\uff0c\u5df2\u505c\u6b62\u4ee5\u907f\u514d\u7ee7\u7eed\u89e6\u53d1\u9650\u5236");
+      }
       await sleep(randomDelay(config));
     }
   }
@@ -1608,10 +1638,10 @@ async function runDownloadBatch(scope = "liked") {
     await saveCurrentConfig();
     const config = await loadConfig();
     const rootHandle = await chooseDownloadTarget({
-      preferBrowserDownloads: !config.downloadUseSavedFolder,
-      preferSavedFolder: config.downloadUseSavedFolder,
+      preferBrowserDownloads: false,
+      preferSavedFolder: true,
     });
-    if (config.downloadUseSavedFolder && rootHandle.kind !== "filesystem") {
+    if (rootHandle.kind !== "filesystem") {
       throw new Error("未找到可用的已授权文件夹。请先点击“选择文件夹”，后续下载才不会出现在浏览器下载记录里。");
     }
     const folderRecord = rootHandle.kind === "filesystem"
@@ -1619,7 +1649,7 @@ async function runDownloadBatch(scope = "liked") {
       : null;
     if (rootHandle.kind === "filesystem") {
       if (folderRecord) {
-        const recoveredFromFolder = await recoverDownloadedItemsFromFolderRecord(rootHandle);
+        const recoveredFromFolder = scope === "liked" ? 0 : await recoverDownloadedItemsFromFolderRecord(rootHandle, scope);
         if (recoveredFromFolder) logLine(`已从文件夹记录恢复 ${recoveredFromFolder} 条下载完成记录`, { type: "download_recovered_from_folder", count: recoveredFromFolder });
       } else {
         const resetCount = await resetDownloadStateForFreshFolder();
@@ -1634,7 +1664,7 @@ async function runDownloadBatch(scope = "liked") {
       if (recovered) logLine(`已从日志恢复 ${recovered} 条下载完成记录`, { type: "download_recovered", count: recovered });
     }
     if (scope === "liked") {
-      await runLikedDownloadFlow(rootHandle, config, scopeDef);
+      await runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord);
       return;
     }
 
