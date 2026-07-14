@@ -4,6 +4,32 @@ const INJECTED_ID = "douyin-toolkit-injected";
 
 let sidebarVisible = true;
 
+let sidebarReady = false;
+const pendingSidebarMessages = [];
+
+function flushSidebarMessages() {
+  const frame = document.getElementById(SIDEBAR_ID);
+  if (!sidebarReady || !frame?.contentWindow) return;
+  while (pendingSidebarMessages.length) {
+    frame.contentWindow.postMessage(pendingSidebarMessages.shift(), EXTENSION_ORIGIN);
+  }
+}
+
+function postToSidebar(data) {
+  const frame = document.getElementById(SIDEBAR_ID);
+  if (!sidebarReady || !frame?.contentWindow) {
+    pendingSidebarMessages.push(data);
+    if (pendingSidebarMessages.length > 100) pendingSidebarMessages.shift();
+    return;
+  }
+  try {
+    frame.contentWindow.postMessage(data, EXTENSION_ORIGIN);
+  } catch (error) {
+    pendingSidebarMessages.push(data);
+    console.warn("[douyin-toolkit] sidebar message deferred", error);
+  }
+}
+
 function ensureInjectedScript() {
   if (document.getElementById(INJECTED_ID)) return;
   const script = document.createElement("script");
@@ -21,12 +47,18 @@ function ensureSidebar() {
   frame.src = chrome.runtime.getURL("src/sidebar/index.html");
   frame.setAttribute("title", "抖音收藏备份助手");
   document.documentElement.appendChild(frame);
+  frame.addEventListener("load", () => {
+    sidebarReady = true;
+    flushSidebarMessages();
+  }, { once: true });
 }
 
 function removeSidebar() {
   const frame = document.getElementById(SIDEBAR_ID);
   if (frame) frame.remove();
   sidebarVisible = false;
+  sidebarReady = false;
+  pendingSidebarMessages.length = 0;
 }
 
 function setSidebarVisible(visible) {
@@ -52,8 +84,7 @@ chrome.runtime.onMessage.addListener((message) => {
 
 window.addEventListener("message", (event) => {
   if (event.source === window && event.data && event.data.source === "douyin-toolkit-page") {
-    const frame = document.getElementById(SIDEBAR_ID);
-    if (frame && frame.contentWindow) frame.contentWindow.postMessage(event.data, EXTENSION_ORIGIN);
+    postToSidebar(event.data);
     return;
   }
   if (event.origin === EXTENSION_ORIGIN && event.data && event.data.source === "douyin-toolkit-sidebar") {
