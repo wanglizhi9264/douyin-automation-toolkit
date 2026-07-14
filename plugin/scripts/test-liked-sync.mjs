@@ -45,6 +45,12 @@ globalThis.fetch = async (url) => {
 };
 
 const source = fs.readFileSync(new URL("../src/injected.js", import.meta.url), "utf8");
+const sidebarSource = fs.readFileSync(new URL("../src/sidebar/app.js", import.meta.url), "utf8");
+assert.doesNotMatch(
+  sidebarSource,
+  /async function downloadOne[^\{]*\{\s*async function syncNextLikedPage/,
+  "syncNextLikedPage must not be nested inside downloadOne",
+);
 vm.runInThisContext(source, { filename: "injected.js" });
 const onMessage = listeners.get("message");
 assert.equal(typeof onMessage, "function");

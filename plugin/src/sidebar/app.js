@@ -961,7 +961,6 @@ async function chooseDownloadCandidate(item, candidates, { allowFallback = true 
   throw new Error(`没有可用的视频候选：${errors.join(" | ")}`);
 }
 
-async function downloadOne(item, rootHandle, config) {
 async function syncNextLikedPage(config) {
   logLine("\u672c\u5730\u65e0\u5f85\u4e0b\u8f7d\u8bb0\u5f55\uff0c\u6b63\u5728\u540c\u6b65\u4e0b\u4e00\u9875\u559c\u6b22\u5217\u8868", {
     type: "liked_sync_started",
@@ -1017,6 +1016,8 @@ async function syncNextLikedPage(config) {
   });
   return syncedItems.length;
 }
+
+async function downloadOne(item, rootHandle, config) {
 
   downloadBatchState.inspected = Math.max(downloadBatchState.inspected, downloadBatchState.currentOrder || 0);
   downloadBatchState.currentIndex = item.index;
