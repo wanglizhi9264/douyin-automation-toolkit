@@ -141,7 +141,7 @@ function getDownloadScopeDefinition(scope) {
     label: "喜欢视频",
     startText: "已点击开始下载喜欢视频，正在检查可下载项目",
     emptyText: "没有待下载的喜欢视频",
-    isEligible: (item) => ["favorited", "already_favorited"].includes(item.status) && item.downloadStatus !== "downloaded",
+    isEligible: (item) => ["liked", "favorite_api"].includes(item.source) && item.downloadStatus !== "downloaded",
   };
 }
 
@@ -1211,7 +1211,8 @@ async function runDownloadBatch(scope = "liked") {
       if (recovered) logLine(`已从日志恢复 ${recovered} 条下载完成记录`, { type: "download_recovered", count: recovered });
     }
     const selectedFollowingAuthors = scope === "following" ? await getSelectedFollowingAuthors() : [];
-    const items = (await getAll("items"))
+    const allStoredItems = await getAll("items");
+    const items = allStoredItems
       .filter((item) => scopeDef.isEligible(item, { selectedFollowingAuthors }))
       .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0))
       .slice(0, Number(config.batchSize || DEFAULT_CONFIG.batchSize));
@@ -1220,7 +1221,20 @@ async function runDownloadBatch(scope = "liked") {
       setGlobalStatus("空闲");
       setDownloadStatus("空闲");
       updateDownloadBatchProgress();
-      logLine(scopeDef.emptyText, { type: "download_scope_empty", scope: scopeDef.key });
+      const likedStored = allStoredItems.filter((item) => ["liked", "favorite_api"].includes(item.source));
+      const alreadyDownloaded = likedStored.filter((item) => item.downloadStatus === "downloaded").length;
+      logLine(
+        scopeDef.emptyText + "\uff08\u672c\u5730\u603b\u8bb0\u5f55 " + allStoredItems.length
+          + "\uff0c\u559c\u6b22\u8bb0\u5f55 " + likedStored.length
+          + "\uff0c\u5df2\u4e0b\u8f7d " + alreadyDownloaded + "\uff09",
+        {
+          type: "download_scope_empty",
+          scope: scopeDef.key,
+          storedTotal: allStoredItems.length,
+          likedStored: likedStored.length,
+          alreadyDownloaded,
+        },
+      );
       return;
     }
     downloadBatchState.total = items.length;
