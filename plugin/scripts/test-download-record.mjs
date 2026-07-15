@@ -63,6 +63,34 @@ assert.equal(reconstructed.source, "liked");
 assert.equal(reconstructed.status, "already_favorited");
 assert.equal(reconstructed.downloadStatus, "downloaded");
 assert.equal(reconstructed.authorUid, "author-1");
+const scopedRecovered = recoverDownloadedRecords([
+  {
+    awemeId: "same",
+    index: 10,
+    source: "liked",
+    downloadStatus: "failed",
+  },
+  {
+    awemeId: "same",
+    index: 11,
+    source: "bookmarked",
+    downloadStatus: "failed",
+  },
+], [
+  {
+    awemeId: "same",
+    downloadStatus: "downloaded",
+    videoPath: "data/bookmarked/same.mp4",
+  },
+], {
+  defaultSource: "bookmarked",
+  now,
+});
+assert.equal(scopedRecovered.length, 1);
+assert.equal(scopedRecovered[0].source, "bookmarked");
+assert.equal(scopedRecovered[0].index, 11);
+assert.equal(scopedRecovered[0].downloadStatus, "downloaded");
+assert.equal(scopedRecovered[0].downloadVideoPath, "data/bookmarked/same.mp4");
 
 const sidebarSource = fs.readFileSync(new URL("../src/sidebar/app.js", import.meta.url), "utf8");
 assert.match(sidebarSource, /folderUserId && currentUserId && folderUserId !== currentUserId/);

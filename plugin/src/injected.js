@@ -111,6 +111,28 @@ async function fetchLikedPage(secUid, maxCursor = 0, minCursor = 0, count = 18) 
   };
 }
 
+async function fetchBookmarkedPage(cursor = 0, count = 10) {
+  const params = webParams();
+  params.set("publish_video_strategy_type", "2");
+  const body = new URLSearchParams();
+  body.set("count", String(count || 10));
+  body.set("cursor", String(cursor || 0));
+  const result = await fetchJson("/aweme/v1/web/aweme/listcollection/?" + params, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  const awemeList = result.json?.aweme_list || result.json?.awemeList || [];
+  return {
+    ...result,
+    ok: result.ok && Array.isArray(awemeList),
+    awemeList,
+    hasMore: asBoolean(result.json?.has_more ?? result.json?.hasMore),
+    cursor: result.json?.cursor ?? cursor,
+    total: Number(result.json?.total ?? result.json?.total_count ?? 0) || 0,
+  };
+}
+
 async function fetchAwemeDetail(awemeId) {
   const params = webParams();
   params.set("aweme_id", awemeId);
@@ -314,6 +336,10 @@ window.addEventListener("message", async (event) => {
     }
     if (type === "FETCH_LIKED_PAGE") {
       reply(requestId, type, await fetchLikedPage(payload.secUid, payload.maxCursor, payload.minCursor, payload.count));
+      return;
+    }
+    if (type === "FETCH_BOOKMARKED_PAGE") {
+      reply(requestId, type, await fetchBookmarkedPage(payload.cursor, payload.count));
       return;
     }
     if (type === "DOWNLOAD_TO_FOLDER") {

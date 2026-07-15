@@ -14,6 +14,16 @@ import {
   normalizeLikedPageItems,
   parseLikedProfile,
 } from "../shared/liked-sync.js";
+import {
+  advanceBookmarkedScanState,
+  BOOKMARKED_PAGE_MAX_RETRIES,
+  BOOKMARKED_PAGE_MIN_INTERVAL_MS,
+  BOOKMARKED_PAGE_SIZE,
+  bookmarkedRetryDelayMs,
+  createBookmarkedScanState,
+  normalizeBookmarkedPageItems,
+  parseBookmarkedProfile,
+} from "../shared/bookmarked-sync.js";
 
 const $ = (id) => document.getElementById(id);
 let configHydrated = false;
@@ -22,6 +32,7 @@ let running = false;
 let downloadRunning = false;
 let downloadPauseRequested = false;
 let downloadBatchState = {
+  scope: "liked",
   total: 0,
   completed: 0,
   inspected: 0,
@@ -208,12 +219,14 @@ function buildDownloadRecord(items, state) {
   return {
     generatedAt: new Date().toISOString(),
     likedTotal: items.filter((item) => item.source === "liked" || item.source === "favorite_api").length,
+    bookmarkedTotal: items.filter((item) => item.source === "bookmarked").length,
     eligibleTotal: eligibleItems.length,
     downloadedTotal: eligibleItems.filter((item) => item.downloadStatus === "downloaded").length,
     pendingTotal: eligibleItems.filter((item) => item.downloadStatus !== "downloaded").length,
     failedTotal: eligibleItems.filter((item) => item.downloadStatus === "failed").length,
     current: {
       index: state.currentIndex,
+      scope: state.scope || currentDownloadScope,
       awemeId: state.currentAwemeId,
       resolution: state.currentResolution,
       phase: state.phase,
@@ -326,7 +339,10 @@ async function persistDownloadArtifacts(target, batchState) {
 
 function buildLocalDatabase(items, record) {
   const eligibleItems = items.filter((item) => ["favorited", "already_favorited"].includes(item.status));
-  const downloaded = eligibleItems.filter((item) => item.downloadStatus === "downloaded");
+  const likedItems = eligibleItems.filter((item) => ["liked", "favorite_api"].includes(item.source));
+  const bookmarkedItems = eligibleItems.filter((item) => item.source === "bookmarked");
+  const downloadedLikes = likedItems.filter((item) => item.downloadStatus === "downloaded");
+  const downloadedBookmarked = bookmarkedItems.filter((item) => item.downloadStatus === "downloaded");
   const authors = {};
   const videos = {};
   const texts = {};
@@ -360,10 +376,20 @@ function buildLocalDatabase(items, record) {
       schemaVersion: 1,
       generatedAt: record.generatedAt,
       likes: {
-        total: eligibleItems.length,
-        downloaded: downloaded.map((item) => item.awemeId),
-        pending: eligibleItems.filter((item) => item.downloadStatus !== "downloaded").map((item) => item.awemeId),
-        failed: eligibleItems.filter((item) => item.downloadStatus === "failed").map((item) => item.awemeId),
+        total: likedItems.length,
+        downloaded: downloadedLikes.map((item) => item.awemeId),
+        pending: likedItems.filter((item) => item.downloadStatus !== "downloaded").map((item) => item.awemeId),
+        failed: likedItems.filter((item) => item.downloadStatus === "failed").map((item) => item.awemeId),
+      },
+    },
+    db_bookmarked: {
+      schemaVersion: 1,
+      generatedAt: record.generatedAt,
+      bookmarked: {
+        total: bookmarkedItems.length,
+        downloaded: downloadedBookmarked.map((item) => item.awemeId),
+        pending: bookmarkedItems.filter((item) => item.downloadStatus !== "downloaded").map((item) => item.awemeId),
+        failed: bookmarkedItems.filter((item) => item.downloadStatus === "failed").map((item) => item.awemeId),
       },
     },
     db_authors: authors,
@@ -376,6 +402,7 @@ async function writeLocalDatabaseFiles(target, items, record) {
   const db = buildLocalDatabase(items, record);
   await writeFile(target, "data/.appdata/db_likes.json", `${JSON.stringify(db.db_likes, null, 2)}\n`);
   await writeFile(target, "data/.appdata/db_authors.json", `${JSON.stringify(db.db_authors, null, 2)}\n`);
+  await writeFile(target, "data/.appdata/db_bookmarked.json", JSON.stringify(db.db_bookmarked, null, 2) + "\n");
   await writeFile(target, "data/.appdata/db_videos.json", `${JSON.stringify(db.db_videos, null, 2)}\n`);
   await writeFile(target, "data/.appdata/db_texts.json", `${JSON.stringify(db.db_texts, null, 2)}\n`);
   await writeFile(target, "说明.txt", [
@@ -616,6 +643,7 @@ async function render() {
     .filter((item) => item.downloadStatus && item.downloadStatus !== "not_started")
     .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
   $("likedSummaryCount").textContent = folderRecord?.likedTotal ?? 0;
+  $("bookmarkedSummaryCount").textContent = folderRecord?.bookmarkedTotal ?? 0;
   $("likedSummaryCursor").textContent = recordCurrent?.total
     ? `${recordCurrent.completed || 0} / ${recordCurrent.total || 0}`
     : "-";
@@ -687,6 +715,7 @@ function updateButtons() {
   $("auditBtn").disabled = running;
   $("downloadBtn").disabled = downloadRunning;
   $("downloadBookmarkedBtn").disabled = downloadRunning;
+  $("continueDownloadBtn").disabled = downloadRunning;
   $("downloadFollowingBtn").disabled = downloadRunning;
   $("pauseDownloadBtn").disabled = !downloadRunning;
   $("pauseDownloadTaskBtn").disabled = !downloadRunning;
@@ -1173,6 +1202,131 @@ async function scanNextLikedPage(scanState) {
 }
 
 
+let lastBookmarkedPageRequestAt = 0;
+
+async function startBookmarkedScan() {
+  const profileResult = await sendPageRequest("GET_SELF_PROFILE", {}, 30000);
+  if (!profileResult?.ok) {
+    throw new Error("\u6536\u85cf\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u65e0\u6cd5\u8bfb\u53d6\u5f53\u524d\u767b\u5f55\u7528\u6237\uff0c" + resultError(profileResult));
+  }
+  const profile = parseBookmarkedProfile(profileResult);
+  if (!profile.uid && !profile.secUid) {
+    throw new Error("\u6536\u85cf\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u5f53\u524d\u7528\u6237\u7f3a\u5c11\u8d26\u53f7\u6807\u8bc6");
+  }
+  const state = createBookmarkedScanState(profile);
+  await Promise.all([
+    setConfig("bookmarkedSyncCursor", 0),
+    setConfig("bookmarkedSyncHasMore", true),
+    setConfig("bookmarkedSyncChecked", 0),
+    setConfig("bookmarkedSyncExpectedTotal", profile.expectedTotal),
+    setConfig("bookmarkedSyncProfileUid", profile.uid || profile.secUid),
+    setConfig("bookmarkedSyncProfileNickname", profile.nickname || ""),
+    setConfig("likedSyncProfileUid", profile.uid || profile.secUid),
+    setConfig("likedSyncProfileNickname", profile.nickname || ""),
+  ]);
+  logLine(
+    "\u5f00\u59cb\u4ece\u7b2c 1 \u9875\u68c0\u67e5\u6536\u85cf\u5217\u8868"
+      + (profile.expectedTotal ? "\uff0c\u6296\u97f3\u663e\u793a\u603b\u6570 " + profile.expectedTotal : ""),
+    {
+      type: "bookmarked_scan_started",
+      expectedTotal: profile.expectedTotal,
+      uid: profile.uid || profile.secUid,
+    },
+  );
+  return state;
+}
+
+async function waitForBookmarkedPageSlot() {
+  const elapsed = Date.now() - lastBookmarkedPageRequestAt;
+  if (elapsed < BOOKMARKED_PAGE_MIN_INTERVAL_MS) {
+    await sleep(BOOKMARKED_PAGE_MIN_INTERVAL_MS - elapsed);
+  }
+}
+
+async function requestBookmarkedPageWithRetry(state) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= BOOKMARKED_PAGE_MAX_RETRIES; attempt += 1) {
+    try {
+      while (navigator.onLine === false) {
+        await sleep(1000);
+      }
+      await waitForBookmarkedPageSlot();
+      lastBookmarkedPageRequestAt = Date.now();
+      const page = await sendPageRequest("FETCH_BOOKMARKED_PAGE", {
+        cursor: state.cursor,
+        count: BOOKMARKED_PAGE_SIZE,
+      }, 60000);
+      if (!page?.ok || !Array.isArray(page.awemeList)) {
+        throw new Error(resultError(page));
+      }
+      advanceBookmarkedScanState(state, page, 0);
+      return page;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= BOOKMARKED_PAGE_MAX_RETRIES) break;
+      const delayMs = bookmarkedRetryDelayMs(attempt);
+      logLine(
+        "\u6536\u85cf\u5217\u8868\u7b2c " + (state.page + 1) + " \u9875\u8bf7\u6c42\u5931\u8d25\uff0c"
+          + Math.round(delayMs / 1000) + " \u79d2\u540e\u91cd\u8bd5\uff08" + attempt + "/" + BOOKMARKED_PAGE_MAX_RETRIES + "\uff09\uff1a"
+          + (error?.message || String(error)),
+        {
+          type: "bookmarked_page_retry",
+          page: state.page + 1,
+          attempt,
+          cursor: state.cursor,
+          error: error?.message || String(error),
+        },
+      );
+      await sleep(delayMs);
+    }
+  }
+  throw new Error(
+    "\u6536\u85cf\u5217\u8868\u7b2c " + (state.page + 1) + " \u9875\u8fde\u7eed\u5931\u8d25 "
+      + BOOKMARKED_PAGE_MAX_RETRIES + " \u6b21\uff0c\u6e38\u6807 cursor=" + state.cursor + "\uff1a"
+      + (lastError?.message || String(lastError)),
+  );
+}
+
+async function scanNextBookmarkedPage(scanState) {
+  const page = await requestBookmarkedPageWithRetry(scanState);
+  const existingItems = await getAll("items");
+  const normalized = normalizeBookmarkedPageItems(page.awemeList, existingItems, scanState.seenIds);
+  if (normalized.items.length) await putItems(normalized.items);
+  const nextState = advanceBookmarkedScanState(scanState, page, normalized.items.length);
+  await Promise.all([
+    setConfig("bookmarkedSyncCursor", nextState.cursor),
+    setConfig("bookmarkedSyncHasMore", nextState.hasMore),
+    setConfig("bookmarkedSyncChecked", nextState.checked),
+    setConfig("bookmarkedSyncExpectedTotal", nextState.expectedTotal),
+    setConfig("bookmarkedSyncUpdatedAt", new Date().toISOString()),
+  ]);
+  logLine(
+    "\u68c0\u67e5\u6536\u85cf\u5217\u8868\uff1a\u7b2c " + nextState.page + " \u9875\uff0c\u672c\u9875 "
+      + page.awemeList.length + " \u6761\uff0c\u53ef\u4e0b\u8f7d\u89c6\u9891 " + normalized.items.length
+      + " \u6761\uff0c\u7d2f\u8ba1\u68c0\u67e5\u5230 " + nextState.checked
+      + (nextState.expectedTotal ? "/" + nextState.expectedTotal : "")
+      + (normalized.skippedImages ? "\uff0c\u8df3\u8fc7\u56fe\u6587 " + normalized.skippedImages : ""),
+    {
+      type: "bookmarked_page_checked",
+      page: nextState.page,
+      pageItems: page.awemeList.length,
+      videoItems: normalized.items.length,
+      checked: nextState.checked,
+      expectedTotal: nextState.expectedTotal,
+      skippedImages: normalized.skippedImages,
+      skippedDuplicates: normalized.skippedDuplicates,
+      cursor: nextState.cursor,
+      hasMore: nextState.hasMore,
+      finished: nextState.finished,
+      fullScan: nextState.fullScan,
+    },
+  );
+  return {
+    state: nextState,
+    items: normalized.items,
+  };
+}
+
 async function downloadOne(item, rootHandle, config) {
 
   downloadBatchState.inspected = Math.max(downloadBatchState.inspected, downloadBatchState.currentOrder || 0);
@@ -1613,6 +1767,176 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
 }
 
 
+async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRecord = null) {
+  let scanState = await startBookmarkedScan();
+  const currentUserId = String(scanState.uid || scanState.secUid || "");
+  const folderUserId = String(folderRecord?.user?.uid || "");
+  if (folderUserId && currentUserId && folderUserId !== currentUserId) {
+    throw new Error(
+      "\u8be5\u6587\u4ef6\u5939\u5c5e\u4e8e\u53e6\u4e00\u4e2a\u6296\u97f3\u8d26\u53f7"
+        + (folderRecord?.user?.nickname ? "\uff1a" + folderRecord.user.nickname : "")
+        + "\uff0c\u5df2\u505c\u6b62\u5199\u5165\uff1b\u8bf7\u4e3a\u5f53\u524d\u8d26\u53f7\u9009\u62e9\u65b0\u6587\u4ef6\u5939",
+    );
+  }
+  const recoveredFromFolder = await recoverDownloadedItemsFromFolderRecord(rootHandle, "bookmarked");
+  if (recoveredFromFolder) {
+    logLine(
+      "\u5df2\u4ece\u6587\u4ef6\u5939\u8bb0\u5f55\u6062\u590d " + recoveredFromFolder + " \u6761\u6536\u85cf\u89c6\u9891\u5df2\u4e0b\u8f7d\u8bb0\u5f55",
+      {
+        type: "download_recovered_from_folder",
+        scope: "bookmarked",
+        count: recoveredFromFolder,
+      },
+    );
+  }
+
+  downloadBatchState.total = scanState.expectedTotal;
+  downloadBatchState.completed = 0;
+  downloadBatchState.inspected = 0;
+  downloadBatchState.phase = "\u68c0\u67e5\u6536\u85cf\u5217\u8868";
+  setDownloadStatus("\u68c0\u67e5\u4e2d");
+  updateDownloadBatchProgress();
+  await persistDownloadArtifacts(rootHandle, downloadBatchState);
+  logLine(
+    "\u5f00\u59cb\u68c0\u67e5\u5e76\u4e0b\u8f7d\u6536\u85cf\u89c6\u9891\uff0c\u5df2\u4e0b\u8f7d\u4f5c\u54c1\u4f1a\u81ea\u52a8\u8df3\u8fc7",
+    {
+      type: "bookmarked_download_stream_started",
+      expectedTotal: scanState.expectedTotal,
+      targetKind: rootHandle.kind,
+      folderName: rootHandle.label || "",
+      preferBestQuality: Boolean(config.downloadPreferBestQuality),
+    },
+  );
+
+  let downloaded = 0;
+  let failed = 0;
+  let attempted = 0;
+  let pendingFound = 0;
+  let consecutiveFailures = 0;
+  while (!scanState.finished && !downloadPauseRequested) {
+    downloadBatchState.phase = "\u68c0\u67e5\u6536\u85cf\u5217\u8868";
+    setDownloadStatus("\u68c0\u67e5\u4e2d");
+    updateDownloadBatchProgress();
+    const pageResult = await scanNextBookmarkedPage(scanState);
+    scanState = pageResult.state;
+    downloadBatchState.inspected = scanState.checked;
+    downloadBatchState.total = Math.max(scanState.expectedTotal, scanState.checked);
+    updateDownloadBatchProgress();
+
+    if (scanState.finished && !scanState.fullScan) {
+      throw new Error(
+        "\u6536\u85cf\u5217\u8868\u6e38\u6807\u5f02\u5e38\u7ed3\u675f\uff1acursor=" + scanState.cursor
+          + "\uff0chas_more=" + scanState.hasMore + "\uff0c\u5df2\u505c\u6b62\u4ee5\u907f\u514d\u8bef\u5224\u4e3a\u4e0b\u8f7d\u5b8c\u6210",
+      );
+    }
+    if (scanState.finished && scanState.expectedTotal > 0 && scanState.rawChecked === 0) {
+      throw new Error(
+        "\u6296\u97f3\u663e\u793a\u6536\u85cf " + scanState.expectedTotal
+          + " \u6761\uff0c\u4f46\u6536\u85cf\u5217\u8868\u63a5\u53e3\u8fd4\u56de 0 \u6761\uff1b\u53ef\u80fd\u9700\u8981\u9a8c\u8bc1\u7801\u6216\u767b\u5f55\u72b6\u6001\u5df2\u5931\u6548",
+      );
+    }
+
+    const runnableItems = pageResult.items
+      .filter((item) => scopeDef.isEligible(item))
+      .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0));
+    pendingFound += runnableItems.length;
+    for (const item of runnableItems) {
+      if (downloadPauseRequested) break;
+      attempted += 1;
+      downloadBatchState.currentOrder = attempted;
+      downloadBatchState.currentIndex = item.index;
+      downloadBatchState.currentAwemeId = item.awemeId;
+      downloadBatchState.phase = "\u4e0b\u8f7d\u4e2d";
+      setDownloadStatus("\u4e0b\u8f7d\u4e2d");
+      updateDownloadBatchProgress();
+      try {
+        await downloadOne(item, rootHandle, config);
+        downloaded += 1;
+        consecutiveFailures = 0;
+        downloadBatchState.completed = downloaded;
+      } catch (error) {
+        failed += 1;
+        consecutiveFailures += 1;
+        await saveItem(patchItem(item, {
+          downloadStatus: "failed",
+          lastError: "\u4e0b\u8f7d\u5931\u8d25\uff1a" + (error?.message || String(error)),
+        }));
+        logLine(
+          "\u6536\u85cf\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\uff1a#" + item.index + " " + item.awemeId + " "
+            + (error?.message || String(error)),
+          {
+            type: "download_failed",
+            awemeId: item.awemeId,
+            index: item.index,
+            error: error?.message || String(error),
+            scope: "bookmarked",
+          },
+        );
+      }
+      await persistDownloadArtifacts(rootHandle, downloadBatchState);
+      updateDownloadBatchProgress();
+      await render();
+      if (consecutiveFailures >= 8) {
+        throw new Error("\u8fde\u7eed 8 \u4e2a\u6536\u85cf\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\uff0c\u5df2\u505c\u6b62\u4ee5\u907f\u514d\u7ee7\u7eed\u89e6\u53d1\u9650\u5236");
+      }
+      await sleep(randomDelay(config));
+    }
+  }
+
+  if (downloadPauseRequested) {
+    downloadBatchState.phase = "\u5df2\u6682\u505c";
+    await persistDownloadArtifacts(rootHandle, downloadBatchState);
+    logLine(
+      "\u6536\u85cf\u89c6\u9891\u4e0b\u8f7d\u5df2\u6682\u505c\uff1a\u68c0\u67e5\u5230 " + scanState.checked
+        + "\uff0c\u672c\u6b21\u4e0b\u8f7d " + downloaded + "\uff0c\u5931\u8d25 " + failed,
+      {
+        type: "bookmarked_download_paused",
+        checked: scanState.checked,
+        downloaded,
+        failed,
+      },
+    );
+    return;
+  }
+
+  const allItems = await getAll("items");
+  const bookmarkedItems = allItems.filter((item) => item.source === "bookmarked");
+  const alreadyDownloaded = bookmarkedItems.filter((item) => item.downloadStatus === "downloaded").length;
+  downloadBatchState.phase = "\u5df2\u5b8c\u6210";
+  await Promise.all([
+    setConfig("bookmarkedSyncCompletedAt", new Date().toISOString()),
+    setConfig("bookmarkedSyncCompletedCount", scanState.checked),
+  ]);
+  await persistDownloadArtifacts(rootHandle, downloadBatchState);
+  if (!pendingFound) {
+    logLine(
+      "\u6536\u85cf\u5217\u8868\u83b7\u53d6\u6210\u529f\uff1a\u68c0\u67e5\u5230 " + scanState.checked
+        + " \u4e2a\u89c6\u9891\uff0c\u6ca1\u6709\u65b0\u7684\u5f85\u4e0b\u8f7d\u9879\u76ee\uff0c\u672c\u5730\u5df2\u4e0b\u8f7d " + alreadyDownloaded,
+      {
+        type: "bookmarked_scan_no_new_downloads",
+        checked: scanState.checked,
+        alreadyDownloaded,
+      },
+    );
+  }
+  logLine(
+    "\u6536\u85cf\u89c6\u9891\u4efb\u52a1\u5b8c\u6210\uff1a\u68c0\u67e5\u5230 " + scanState.checked
+      + "\uff0c\u672c\u6b21\u4e0b\u8f7d " + downloaded + "\uff0c\u5931\u8d25 " + failed
+      + "\uff0c\u672c\u5730\u5df2\u4e0b\u8f7d " + alreadyDownloaded,
+    {
+      type: "bookmarked_download_stream_finished",
+      checked: scanState.checked,
+      rawChecked: scanState.rawChecked,
+      downloaded,
+      failed,
+      alreadyDownloaded,
+      expectedTotal: scanState.expectedTotal,
+      pages: scanState.page,
+    },
+  );
+}
+
+
 async function runDownloadBatch(scope = "liked") {
   if (downloadRunning) return;
   downloadRunning = true;
@@ -1628,6 +1952,7 @@ async function runDownloadBatch(scope = "liked") {
     currentIndex: null,
     currentAwemeId: "",
     phase: "准备下载",
+    scope,
   };
   updateButtons();
   setGlobalStatus("下载中");
@@ -1636,6 +1961,7 @@ async function runDownloadBatch(scope = "liked") {
   logLine(scopeDef.startText, { type: "download_scope_start", scope: scopeDef.key });
   try {
     await saveCurrentConfig();
+    await setConfig("lastDownloadScope", scope);
     const config = await loadConfig();
     const rootHandle = await chooseDownloadTarget({
       preferBrowserDownloads: false,
@@ -1649,7 +1975,7 @@ async function runDownloadBatch(scope = "liked") {
       : null;
     if (rootHandle.kind === "filesystem") {
       if (folderRecord) {
-        const recoveredFromFolder = scope === "liked" ? 0 : await recoverDownloadedItemsFromFolderRecord(rootHandle, scope);
+        const recoveredFromFolder = ["liked", "bookmarked"].includes(scope) ? 0 : await recoverDownloadedItemsFromFolderRecord(rootHandle, scope);
         if (recoveredFromFolder) logLine(`已从文件夹记录恢复 ${recoveredFromFolder} 条下载完成记录`, { type: "download_recovered_from_folder", count: recoveredFromFolder });
       } else {
         const resetCount = await resetDownloadStateForFreshFolder();
@@ -1665,6 +1991,10 @@ async function runDownloadBatch(scope = "liked") {
     }
     if (scope === "liked") {
       await runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord);
+      return;
+    }
+    if (scope === "bookmarked") {
+      await runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRecord);
       return;
     }
 
@@ -1851,12 +2181,32 @@ $("auditBtn").addEventListener("click", async () => {
   await runAuditFromButton();
 });
 
+async function resolveContinueDownloadScope() {
+  const fallbackScope = await getConfig("lastDownloadScope", "liked");
+  const storedTarget = await getStoredDownloadTarget({ requestPermission: true });
+  const folderRecord = storedTarget?.permission === "granted"
+    ? await getCachedDownloadRecord(storedTarget, { force: true })
+    : null;
+  const scope = folderRecord?.current?.scope || fallbackScope || "liked";
+  return ["liked", "bookmarked", "following"].includes(scope) ? scope : "liked";
+}
+
+
 $("downloadBtn").addEventListener("click", async () => {
   await runDownloadBatch("liked");
 });
 
 $("downloadBookmarkedBtn").addEventListener("click", async () => {
   await runDownloadBatch("bookmarked");
+});
+
+$("continueDownloadBtn").addEventListener("click", async () => {
+  const scope = await resolveContinueDownloadScope();
+  logLine("\u7ee7\u7eed\u4e0a\u6b21\u4e0b\u8f7d\u4efb\u52a1\uff1a" + getDownloadScopeDefinition(scope).label, {
+    type: "download_continue_requested",
+    scope,
+  });
+  await runDownloadBatch(scope);
 });
 
 $("downloadFollowingBtn").addEventListener("click", async () => {

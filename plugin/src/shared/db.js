@@ -1,5 +1,24 @@
 const DB_NAME = "douyin_toolkit";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+const SCOPED_ITEMS_STORE = "scopedItems";
+
+export function itemScope(source) {
+  if (source === "favorite_api") return "liked";
+  return source || "liked";
+}
+
+export function itemKeyFor(item) {
+  return itemScope(item?.source) + ":" + String(item?.awemeId || "");
+}
+
+function createItemsStore(db, name, keyPath) {
+  const store = db.createObjectStore(name, { keyPath });
+  store.createIndex("status", "status");
+  store.createIndex("source", "source");
+  store.createIndex("index", "index");
+  store.createIndex("updatedAt", "updatedAt");
+  return store;
+}
 
 let dbPromise = null;
 
@@ -11,11 +30,16 @@ export function openDb() {
       const db = request.result;
       if (!db.objectStoreNames.contains("config")) db.createObjectStore("config", { keyPath: "key" });
       if (!db.objectStoreNames.contains("items")) {
-        const store = db.createObjectStore("items", { keyPath: "awemeId" });
-        store.createIndex("status", "status");
-        store.createIndex("source", "source");
-        store.createIndex("index", "index");
-        store.createIndex("updatedAt", "updatedAt");
+        createItemsStore(db, "items", "awemeId");
+      }
+      if (!db.objectStoreNames.contains(SCOPED_ITEMS_STORE)) {
+        const scopedStore = createItemsStore(db, SCOPED_ITEMS_STORE, "itemKey");
+        const legacyRequest = request.transaction.objectStore("items").getAll();
+        legacyRequest.onsuccess = () => {
+          for (const item of legacyRequest.result || []) {
+            scopedStore.put({ ...item, itemKey: itemKeyFor(item) });
+          }
+        };
       }
       if (!db.objectStoreNames.contains("logs")) {
         const store = db.createObjectStore("logs", { keyPath: "id", autoIncrement: true });
@@ -40,8 +64,9 @@ function txDone(transaction) {
 
 export async function getAll(storeName) {
   const db = await openDb();
+  const actualStoreName = storeName === "items" && db.objectStoreNames.contains(SCOPED_ITEMS_STORE) ? SCOPED_ITEMS_STORE : storeName;
   return new Promise((resolve, reject) => {
-    const request = db.transaction(storeName).objectStore(storeName).getAll();
+    const request = db.transaction(actualStoreName).objectStore(actualStoreName).getAll();
     request.onsuccess = () => resolve(request.result || []);
     request.onerror = () => reject(request.error);
   });
@@ -65,16 +90,18 @@ export async function setConfig(key, value) {
 
 export async function putItems(items) {
   const db = await openDb();
-  const tx = db.transaction("items", "readwrite");
-  const store = tx.objectStore("items");
-  for (const item of items) store.put(item);
+  const storeName = db.objectStoreNames.contains(SCOPED_ITEMS_STORE) ? SCOPED_ITEMS_STORE : "items";
+  const tx = db.transaction(storeName, "readwrite");
+  const store = tx.objectStore(storeName);
+  for (const item of items) store.put(storeName === SCOPED_ITEMS_STORE ? { ...item, itemKey: itemKeyFor(item) } : item);
   await txDone(tx);
 }
 
 export async function clearItems() {
   const db = await openDb();
-  const tx = db.transaction("items", "readwrite");
-  tx.objectStore("items").clear();
+  const storeName = db.objectStoreNames.contains(SCOPED_ITEMS_STORE) ? SCOPED_ITEMS_STORE : "items";
+  const tx = db.transaction(storeName, "readwrite");
+  tx.objectStore(storeName).clear();
   await txDone(tx);
 }
 

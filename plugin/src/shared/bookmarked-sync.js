@@ -1,8 +1,8 @@
 import { normalizeAweme } from "./api.js";
 
-export const LIKED_PAGE_SIZE = 18;
-export const LIKED_PAGE_MIN_INTERVAL_MS = 5000;
-export const LIKED_PAGE_MAX_RETRIES = 3;
+export const BOOKMARKED_PAGE_SIZE = 10;
+export const BOOKMARKED_PAGE_MIN_INTERVAL_MS = 3000;
+export const BOOKMARKED_PAGE_MAX_RETRIES = 3;
 
 function valueFromUser(user, keys, fallback = "") {
   for (const key of keys) {
@@ -11,24 +11,28 @@ function valueFromUser(user, keys, fallback = "") {
   return fallback;
 }
 
-export function parseLikedProfile(profile) {
+export function parseBookmarkedProfile(profile) {
   const user = profile?.json?.user || profile?.json?.user_info || profile?.json;
   return {
     secUid: String(valueFromUser(user, ["sec_uid", "secUid", "sec_user_id"])),
     uid: String(valueFromUser(user, ["uid", "id"])),
     nickname: String(valueFromUser(user, ["nickname", "name"])),
-    expectedTotal: Number(valueFromUser(user, ["favoriting_count", "favoritingCount"], 0)) || 0,
+    expectedTotal: Number(valueFromUser(user, [
+      "collect_count",
+      "collection_count",
+      "aweme_collect_count",
+      "collectCount",
+    ], 0)) || 0,
   };
 }
 
-export function createLikedScanState(profile) {
+export function createBookmarkedScanState(profile = {}) {
   return {
-    secUid: profile.secUid,
-    uid: profile.uid,
-    nickname: profile.nickname,
-    expectedTotal: profile.expectedTotal,
-    maxCursor: 0,
-    minCursor: 0,
+    secUid: profile.secUid || "",
+    uid: profile.uid || "",
+    nickname: profile.nickname || "",
+    expectedTotal: Number(profile.expectedTotal || 0),
+    cursor: 0,
     hasMore: true,
     finished: false,
     fullScan: false,
@@ -39,45 +43,44 @@ export function createLikedScanState(profile) {
   };
 }
 
-export function isVideoAweme(aweme) {
+export function advanceBookmarkedScanState(state, page, videoCount) {
+  const currentCursor = String(state.cursor ?? 0);
+  const nextCursor = page.cursor ?? state.cursor ?? 0;
+  const nextCursorText = String(nextCursor ?? 0);
+  const hasMore = page.hasMore === true;
+  const terminalCursor = nextCursorText === "0" || nextCursorText === "-1" || nextCursorText === "";
+  if (!terminalCursor && nextCursorText === currentCursor) {
+    throw new Error("bookmarked cursor did not advance");
+  }
+  const responseTotal = Number(page.total || 0);
+  return {
+    ...state,
+    cursor: nextCursor,
+    hasMore,
+    finished: terminalCursor,
+    fullScan: !hasMore && nextCursorText === "0",
+    page: state.page + 1,
+    checked: state.checked + videoCount,
+    rawChecked: state.rawChecked + (Array.isArray(page.awemeList) ? page.awemeList.length : 0),
+    expectedTotal: responseTotal > 0
+      ? responseTotal
+      : Math.max(Number(state.expectedTotal || 0), state.checked + videoCount),
+  };
+}
+
+export function isBookmarkedVideoAweme(aweme) {
   if (Array.isArray(aweme?.images)) return false;
   return Boolean(aweme?.aweme_id || aweme?.awemeId || aweme?.id);
 }
 
-export function advanceLikedScanState(state, page, videoCount) {
-  const currentMax = String(state.maxCursor ?? 0);
-  const currentMin = String(state.minCursor ?? 0);
-  const nextMax = page.maxCursor ?? state.maxCursor ?? 0;
-  const nextMin = page.minCursor ?? state.minCursor ?? 0;
-  const nextMaxText = String(nextMax ?? 0);
-  const nextMinText = String(nextMin ?? 0);
-  const hasMore = page.hasMore === true;
-  const terminalCursor = nextMaxText === "0" || nextMaxText === "-1" || nextMaxText === "";
-  const cursorAdvanced = nextMaxText !== currentMax || nextMinText !== currentMin;
-  if (!terminalCursor && !cursorAdvanced) {
-    throw new Error("liked cursor did not advance");
-  }
-  return {
-    ...state,
-    maxCursor: nextMax,
-    minCursor: nextMin,
-    hasMore,
-    finished: terminalCursor,
-    fullScan: !hasMore && nextMaxText === "0",
-    page: state.page + 1,
-    checked: state.checked + videoCount,
-    rawChecked: state.rawChecked + (Array.isArray(page.awemeList) ? page.awemeList.length : 0),
-  };
-}
-
-function mergeLikedItem(normalized, existing) {
+function mergeBookmarkedItem(normalized, existing) {
   return {
     ...normalized,
     ...(existing || {}),
     index: existing?.index ?? normalized.index,
-    source: ["liked", "favorite_api"].includes(existing?.source) ? existing.source : "liked",
-    status: existing?.status || normalized.status,
-    collectStat: normalized.collectStat ?? existing?.collectStat ?? null,
+    source: "bookmarked",
+    status: "already_favorited",
+    collectStat: 1,
     desc: normalized.desc || existing?.desc || "",
     authorUid: normalized.authorUid || existing?.authorUid || "",
     authorName: normalized.authorName || existing?.authorName || "",
@@ -91,9 +94,9 @@ function mergeLikedItem(normalized, existing) {
   };
 }
 
-export function normalizeLikedPageItems(awemeList, existingItems, seenIds = new Set()) {
-  const likedItems = existingItems.filter((item) => ["liked", "favorite_api"].includes(item.source));
-  const existingById = new Map(likedItems.map((item) => [String(item.awemeId), item]));
+export function normalizeBookmarkedPageItems(awemeList, existingItems, seenIds = new Set()) {
+  const bookmarkedItems = existingItems.filter((item) => item.source === "bookmarked");
+  const existingById = new Map(bookmarkedItems.map((item) => [String(item.awemeId), item]));
   let nextIndex = existingItems.reduce(
     (max, item) => Math.max(max, Number(item.index ?? -1)),
     -1,
@@ -102,7 +105,7 @@ export function normalizeLikedPageItems(awemeList, existingItems, seenIds = new 
   let skippedImages = 0;
   let skippedDuplicates = 0;
   for (const aweme of awemeList || []) {
-    if (!isVideoAweme(aweme)) {
+    if (!isBookmarkedVideoAweme(aweme)) {
       if (Array.isArray(aweme?.images)) skippedImages += 1;
       continue;
     }
@@ -113,9 +116,9 @@ export function normalizeLikedPageItems(awemeList, existingItems, seenIds = new 
     }
     seenIds.add(awemeId);
     const existing = existingById.get(awemeId);
-    const normalized = normalizeAweme(aweme, existing?.index ?? nextIndex, "liked");
+    const normalized = normalizeAweme(aweme, existing?.index ?? nextIndex, "bookmarked");
     if (!existing) nextIndex += 1;
-    items.push(mergeLikedItem(normalized, existing));
+    items.push(mergeBookmarkedItem(normalized, existing));
   }
   return {
     items,
@@ -124,6 +127,6 @@ export function normalizeLikedPageItems(awemeList, existingItems, seenIds = new 
   };
 }
 
-export function likedRetryDelayMs(attempt) {
+export function bookmarkedRetryDelayMs(attempt) {
   return 7000 * Math.max(1, Number(attempt || 1));
 }

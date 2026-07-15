@@ -1,8 +1,15 @@
+function recordKey(source, awemeId) {
+  const scope = source === "favorite_api" ? "liked" : (source || "liked");
+  return scope + ":" + String(awemeId || "");
+}
+
 export function recoverDownloadedRecords(existingItems, recordItems, {
   defaultSource = "liked",
   now = new Date().toISOString(),
 } = {}) {
-  const existingById = new Map(existingItems.map((item) => [String(item.awemeId), item]));
+  const existingById = new Map(existingItems.map((item) => [
+    recordKey(item.source, item.awemeId), item,
+  ]));
   let nextIndex = existingItems.reduce(
     (max, item) => Math.max(max, Number(item.index ?? -1)),
     -1,
@@ -11,7 +18,8 @@ export function recoverDownloadedRecords(existingItems, recordItems, {
   for (const recordItem of recordItems || []) {
     if (!recordItem?.awemeId || recordItem.downloadStatus !== "downloaded") continue;
     const awemeId = String(recordItem.awemeId);
-    const existing = existingById.get(awemeId);
+    const source = recordItem.source || defaultSource;
+    const existing = existingById.get(recordKey(source, awemeId));
     if (existing?.downloadStatus === "downloaded") continue;
     if (existing) {
       recovered.push({
@@ -37,7 +45,7 @@ export function recoverDownloadedRecords(existingItems, recordItems, {
     recovered.push({
       awemeId,
       index,
-      source: recordItem.source || defaultSource,
+      source,
       status: recordItem.status || "already_favorited",
       collectStat: 1,
       desc: recordItem.desc || "",
