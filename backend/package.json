@@ -1,6 +1,6 @@
 {
   "name": "douyin-liked-favorite-tool",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,12 @@
     "douyin:run": "node scripts/douyin-favorite-liked.mjs run",
     "douyin:audit": "node scripts/douyin-favorite-liked.mjs audit",
     "douyin:cycle": "node scripts/douyin-favorite-liked.mjs cycle",
-    "douyin:dashboard": "node scripts/douyin-dashboard.mjs"
+    "douyin:dashboard": "node scripts/douyin-dashboard.mjs",
+    "douyin:download-liked": "node scripts/douyin-download.mjs liked",
+    "douyin:download-bookmarked": "node scripts/douyin-download.mjs bookmarked",
+    "douyin:download-resume": "node scripts/douyin-download.mjs resume",
+    "test": "node scripts/test-douyin-download-core.mjs && node scripts/test-douyin-download-api.mjs",
+    "check": "node --check scripts/douyin-favorite-liked.mjs && node --check scripts/douyin-dashboard.mjs && node --check scripts/douyin-download-core.mjs && node --check scripts/douyin-download-api.mjs && node --check scripts/douyin-download.mjs && npm test"
   },
   "dependencies": {
     "playwright": "^1.61.1"

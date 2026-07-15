@@ -9,5 +9,12 @@
   "cycleBatchSize": 100,
   "cycleAuditRecent": 120,
   "continueOnAuditFailure": true,
-  "maxConsecutiveAuditFailures": 6
+  "maxConsecutiveAuditFailures": 6,
+  "downloadRoot": "data/douyin-backup",
+  "downloadCovers": true,
+  "downloadPreferBestQuality": true,
+  "downloadHeadless": false,
+  "downloadMinDelayMs": 300,
+  "downloadMaxDelayMs": 900,
+  "mediaTimeoutMs": 120000
 }
