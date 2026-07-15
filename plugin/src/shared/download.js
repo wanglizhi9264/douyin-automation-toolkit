@@ -170,6 +170,8 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     throw new Error("\u5a92\u4f53\u6587\u4ef6\u5fc5\u987b\u5199\u5165\u5df2\u6388\u6743\u6587\u4ef6\u5939");
   }
   const controller = new AbortController();
+  const timingNow = () => globalThis.performance?.now?.() ?? Date.now();
+  const startedAt = timingNow();
   let phase = "request";
   const headerTimeout = setTimeout(() => controller.abort(), headerTimeoutMs);
   const totalTimeout = setTimeout(() => controller.abort(), totalTimeoutMs);
@@ -179,6 +181,7 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
       signal: controller.signal,
       headers: { "accept": "*/*" },
     });
+    const headersAt = timingNow();
     phase = "download";
     clearTimeout(headerTimeout);
     const contentType = response.headers.get("content-type") || "";
@@ -200,6 +203,7 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
       throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u672a\u8fd4\u56de\u89c6\u9891\u5927\u5c0f");
     }
     const blob = await response.blob();
+    const downloadedAt = timingNow();
     if (!blob.size) {
       throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a0 \u5b57\u8282");
     }
@@ -208,10 +212,17 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     }
     phase = "write";
     await writeFile(target, relativePath, blob);
+    const writtenAt = timingNow();
     return {
       ok: true,
       size: blob.size,
       contentType: blob.type || contentType,
+      timings: {
+        requestMs: headersAt - startedAt,
+        transferMs: downloadedAt - headersAt,
+        writeMs: writtenAt - downloadedAt,
+        totalMs: writtenAt - startedAt,
+      },
       precheck: {
         ok: true,
         httpStatus: response.status,

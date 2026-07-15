@@ -113,7 +113,10 @@ export function describeVideoCandidate(candidate) {
 
 export function normalizeAweme(aweme, index = 0, source = "liked") {
   const awemeId = String(aweme?.aweme_id || aweme?.awemeId || aweme?.id || "");
-  const videoCandidate = pickVideoUrl(aweme);
+  const now = new Date().toISOString();
+  const videoCandidates = pickVideoCandidates(aweme, { preferBestQuality: true }).slice(0, 5);
+  const videoFallbackCandidate = pickVideoUrl(aweme, { preferBestQuality: false });
+  const videoCandidate = videoFallbackCandidate || videoCandidates[0] || null;
   return {
     awemeId,
     index,
@@ -126,9 +129,12 @@ export function normalizeAweme(aweme, index = 0, source = "liked") {
     url: awemeId ? `https://www.douyin.com/video/${awemeId}` : "",
     coverUrl: aweme?.video?.cover?.url_list?.[0] || "",
     videoUrl: videoCandidate?.url || "",
+    videoCandidates,
+    videoFallbackCandidate,
+    videoCandidatesFetchedAt: now,
     downloadStatus: "not_started",
     lastError: "",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt: now,
+    updatedAt: now,
   };
 }

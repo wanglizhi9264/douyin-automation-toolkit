@@ -178,12 +178,13 @@ bookmarked:765...
 
 文件夹模式下载：
 
-1. 获取作品详情并排序。
-2. 合并普通兼容 fallback，按 URL 去重。
-3. 最高画质最多尝试前 4 个候选；普通模式只尝试 1 个。
-4. 每个候选执行 fetch、响应与 Blob 校验后直接写入目标路径。
-5. 成功后记录实际候选，而不是最初候选。
-6. 全部候选失败才把作品标记 `failed`。
+1. 列表归一化时预先计算最高画质候选、普通兼容 fallback 和候选时间戳。
+2. 下载时若候选不超过 10 分钟，直接复用；缺失、过期或需补封面时才请求作品详情。
+3. 合并普通兼容 fallback，按 URL 去重。
+4. 最高画质最多尝试前 4 个候选；普通模式只尝试 1 个。
+5. 每个候选只 fetch 一次，在同一次响应中完成状态、MIME、长度和 Blob 校验，再写入目标路径。
+6. 成功后记录实际候选，而不是最初候选。
+7. 全部候选失败才把作品标记 `failed`。
 
 这套逻辑由 `downloadOne` 统一调用，liked 与 bookmarked 不得各自实现画质分支。
 
@@ -191,11 +192,11 @@ bookmarked:765...
 
 ### 8.1 写盘时机
 
-- 任务开始。
-- 单条作品成功或失败后。
-- 用户暂停。
-- 完整扫描结束。
-- 外层异常结束前的收尾路径。
+- 任务开始写 `download-state.json`。
+- 单条作品成功或失败后立即更新 `download-state.json`，保证断点可恢复。
+- HTML、五个汇总数据库和完整日志每 10 条或 30 秒刷新一次，避免每条重写全部资产。
+- 用户暂停、完整扫描结束和外层收尾时强制完整刷新。
+- `performance-summary.json` 在完整刷新及任务最终收尾时写入。
 
 媒体写入成功后，item 才更新为 `downloaded`。
 
@@ -214,6 +215,24 @@ bookmarked:765...
 远端列表会新增、删除、重排，分页 cursor 也可能过期。保存 cursor 并从中间恢复可能漏掉新内容。因此继续下载使用“从第一页重新对账 + 本地 downloaded 幂等跳过”。
 
 ## 9. 文件与数据契约
+### 8.4 性能可观测性
+
+`shared/performance.js` 保存当前任务的阶段样本并生成汇总。sidebar 只持有单个活动 tracker；任务结束后转为只读的最后汇总。
+
+核心阶段：
+
+- `profile_api`：官方喜欢/收藏总数请求。
+- `list_api`、`list_throttle_wait`、`list_retry_wait`：列表接口与主动限流。
+- `detail_api`、`download_candidates_reused`：详情请求与候选复用。
+- `video_request`、`video_transfer`、`video_write`：媒体首包、Blob 传输、文件写入。
+- `checkpoint_write`、`artifact_full_write`：轻量续跑状态与重型汇总资产。
+- `item_delay`、`ui_render`：条目间保护等待与 UI 开销。
+
+汇总按阶段输出 count、total、average、P50、P95、max、failures。传输阶段额外聚合 bytes 和 MB/s。按 total 排序的前五项是当前任务瓶颈；主动等待与网络耗时必须分开解释，不能把限流等待误判为网速。
+
+侧边栏首次打开只调用一次 `GET_SELF_PROFILE` 获取 `favoriting_count` 和收藏统计字段，因此总数显示速度不依赖完整列表扫描。官方总数、已扫描数和已下载数是三个不同语义。
+
+
 
 `download-state.json` 至少包含：
 

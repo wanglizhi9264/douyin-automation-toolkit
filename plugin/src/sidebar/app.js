@@ -24,6 +24,12 @@ import {
   normalizeBookmarkedPageItems,
   parseBookmarkedProfile,
 } from "../shared/bookmarked-sync.js";
+import {
+  createPerformanceTracker,
+  formatPerformanceSummary,
+  recordPerformanceSample,
+  summarizePerformance,
+} from "../shared/performance.js";
 
 const $ = (id) => document.getElementById(id);
 let configHydrated = false;
@@ -48,6 +54,191 @@ let downloadRecordCache = {
 };
 let currentView = "home";
 let currentDownloadScope = "liked";
+
+let activePerformanceTracker = null;
+let lastPerformanceSummary = null;
+let activeDownloadTarget = null;
+const CANDIDATE_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+const FULL_ARTIFACT_EVERY_ITEMS = 10;
+const FULL_ARTIFACT_MAX_INTERVAL_MS = 30 * 1000;
+let artifactCheckpoint = {
+  targetKey: "",
+  itemsSinceFull: 0,
+  lastFullAt: 0,
+};
+let scheduledRenderTimer = null;
+let remoteProfileCache = { result: null, loadedAt: 0 };
+let remoteProfileSummary = {
+  status: "idle",
+  likedTotal: null,
+  bookmarkedTotal: null,
+  nickname: "",
+  durationMs: 0,
+  loadedAt: "",
+  error: "",
+};
+
+function timingNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function recordStage(stage, durationMs, meta = {}) {
+  return recordPerformanceSample(activePerformanceTracker, stage, durationMs, meta);
+}
+
+async function timedStage(stage, task, meta = {}) {
+  const startedAt = timingNow();
+  try {
+    const result = await task();
+    recordStage(stage, timingNow() - startedAt, { ...meta, ok: true });
+    return result;
+  } catch (error) {
+    recordStage(stage, timingNow() - startedAt, {
+      ...meta,
+      ok: false,
+      error: error?.message || String(error),
+    });
+    throw error;
+  }
+}
+
+async function waitTracked(stage, delayMs, meta = {}) {
+  const delay = Math.max(0, Number(delayMs || 0));
+  if (!delay) return;
+  await timedStage(stage, () => sleep(delay), { ...meta, scheduledMs: delay });
+}
+
+function currentPerformanceSummary() {
+  return activePerformanceTracker
+    ? summarizePerformance(activePerformanceTracker)
+    : lastPerformanceSummary;
+}
+function recordMediaTimings(result, {
+  kind = "video",
+  awemeId = "",
+  candidateRank = 0,
+} = {}) {
+  const timings = result?.timings;
+  if (!timings) return;
+  const meta = {
+    kind,
+    awemeId,
+    candidateRank,
+    bytes: Number(result?.size || 0),
+  };
+  recordStage(`${kind}_request`, timings.requestMs, { ...meta, bytes: 0, ok: true });
+  recordStage(`${kind}_transfer`, timings.transferMs, { ...meta, ok: true });
+  recordStage(`${kind}_write`, timings.writeMs, { ...meta, bytes: 0, ok: true });
+}
+
+async function finalizeDownloadPerformance() {
+  const tracker = activePerformanceTracker;
+  const target = activeDownloadTarget;
+  if (!tracker) return;
+  try {
+    if (target?.kind === "filesystem") {
+      await persistDownloadArtifacts(target, downloadBatchState, { forceFull: true });
+    }
+    lastPerformanceSummary = summarizePerformance(tracker);
+    if (target?.kind === "filesystem") {
+      await writeFile(
+        target,
+        "data/.appdata/performance-summary.json",
+        JSON.stringify(lastPerformanceSummary, null, 2) + "\n",
+      );
+    }
+    logLine("\u4e0b\u8f7d\u6027\u80fd\u7edf\u8ba1\uff1a" + formatPerformanceSummary(lastPerformanceSummary), {
+      type: "download_performance_summary",
+      summary: lastPerformanceSummary,
+    });
+  } catch (error) {
+    lastPerformanceSummary = summarizePerformance(tracker);
+    logLine("\u6027\u80fd\u7edf\u8ba1\u5199\u5165\u5931\u8d25\uff1a" + (error?.message || String(error)), {
+      type: "download_performance_summary_failed",
+      error: error?.message || String(error),
+    });
+  } finally {
+    activePerformanceTracker = null;
+    activeDownloadTarget = null;
+  }
+}
+function scheduleRender(delayMs = 120) {
+  if (scheduledRenderTimer != null) return;
+  scheduledRenderTimer = setTimeout(() => {
+    scheduledRenderTimer = null;
+    render().catch(console.error);
+  }, delayMs);
+}
+
+function profileUser(result) {
+  return result?.json?.user || result?.json?.user_info || result?.json || null;
+}
+
+async function requestSelfProfile({ maxAgeMs = 0, reason = "summary" } = {}) {
+  const age = Date.now() - Number(remoteProfileCache.loadedAt || 0);
+  if (remoteProfileCache.result?.ok && maxAgeMs > 0 && age >= 0 && age <= maxAgeMs) {
+    recordStage("profile_cache", 0, { reason, ok: true });
+    return remoteProfileCache.result;
+  }
+  remoteProfileSummary = { ...remoteProfileSummary, status: "loading", error: "" };
+  scheduleRender();
+  const startedAt = timingNow();
+  const result = await sendPageRequest("GET_SELF_PROFILE", {}, 30000);
+  const durationMs = timingNow() - startedAt;
+  recordStage("profile_api", durationMs, { reason, ok: Boolean(result?.ok) });
+  remoteProfileCache = { result, loadedAt: Date.now() };
+  const user = profileUser(result);
+  if (result?.ok && user) {
+    remoteProfileSummary = {
+      status: "loaded",
+      likedTotal: Number(user.favoriting_count ?? user.favoritingCount ?? 0) || 0,
+      bookmarkedTotal: Number(
+        user.collect_count ?? user.collection_count ?? user.aweme_collect_count ?? user.collectCount ?? 0,
+      ) || 0,
+      nickname: String(user.nickname || user.name || ""),
+      durationMs,
+      loadedAt: new Date().toISOString(),
+      error: "",
+    };
+  } else {
+    remoteProfileSummary = {
+      ...remoteProfileSummary,
+      status: "failed",
+      durationMs,
+      loadedAt: new Date().toISOString(),
+      error: resultError(result),
+    };
+  }
+  scheduleRender();
+  return result;
+}
+
+async function refreshRemoteProfileSummary({ silent = false } = {}) {
+  try {
+    const result = await requestSelfProfile({ reason: "sidebar_summary" });
+    if (!result?.ok) throw new Error(resultError(result));
+    if (!silent) {
+      logLine(
+        "Official counts loaded: liked=" + remoteProfileSummary.likedTotal
+          + " bookmarked=" + remoteProfileSummary.bookmarkedTotal
+          + " in " + Math.round(remoteProfileSummary.durationMs) + "ms",
+        {
+          type: "remote_profile_summary_loaded",
+          likedTotal: remoteProfileSummary.likedTotal,
+          bookmarkedTotal: remoteProfileSummary.bookmarkedTotal,
+          durationMs: remoteProfileSummary.durationMs,
+        },
+      );
+    }
+  } catch (error) {
+    if (!silent) {
+      logLine("Official counts failed: " + (error?.message || String(error)), {
+        type: "remote_profile_summary_failed",
+        error: error?.message || String(error),
+      });
+    }
+  }
+}
 
 async function getSelectedFollowingAuthors() {
   const result = await chrome.storage.local.get(["selectedFollowingAuthors"]);
@@ -313,8 +504,21 @@ function buildDownloadReportHtml(record, folderLabel = "") {
 </html>`;
 }
 
-async function persistDownloadArtifacts(target, batchState) {
-  if (target.kind !== "filesystem") return;
+async function persistDownloadArtifacts(target, batchState, {
+  forceFull = false,
+  itemCompleted = false,
+} = {}) {
+  if (target.kind !== "filesystem") return { full: false };
+  const startedAt = timingNow();
+  const targetKey = getTargetCacheKey(target);
+  if (artifactCheckpoint.targetKey !== targetKey) {
+    artifactCheckpoint = {
+      targetKey,
+      itemsSinceFull: 0,
+      lastFullAt: Date.now(),
+    };
+  }
+  if (itemCompleted) artifactCheckpoint.itemsSinceFull += 1;
   const [items, profileUid, profileNickname] = await Promise.all([
     getAll("items"),
     getConfig("likedSyncProfileUid", ""),
@@ -325,16 +529,44 @@ async function persistDownloadArtifacts(target, batchState) {
     uid: profileUid || "",
     nickname: profileNickname || "",
   };
+  record.performance = currentPerformanceSummary();
+  await writeFile(target, getDownloadRecordPath(), `${JSON.stringify(record, null, 2)}\n`);
+  setCachedDownloadRecord(target, record);
+  recordStage("checkpoint_write", timingNow() - startedAt, {
+    ok: true,
+    items: items.length,
+    itemCompleted,
+  });
+
+  const now = Date.now();
+  const shouldWriteFull = forceFull
+    || artifactCheckpoint.itemsSinceFull >= FULL_ARTIFACT_EVERY_ITEMS
+    || now - artifactCheckpoint.lastFullAt >= FULL_ARTIFACT_MAX_INTERVAL_MS;
+  if (!shouldWriteFull) return { full: false, record };
+
+  const fullStartedAt = timingNow();
   const logs = await getAll("logs");
   const logReport = sanitizeDiagnostic({
     generatedAt: new Date().toISOString(),
     logs,
   });
-  await writeFile(target, getDownloadRecordPath(), `${JSON.stringify(record, null, 2)}\n`);
-  await writeFile(target, getDownloadReportPath(), buildDownloadReportHtml(record, target.label || ""));
-  await writeLocalDatabaseFiles(target, items, record);
-  await writeFile(target, "data/.appdata/download-log.json", JSON.stringify(logReport, null, 2) + "\n");
-  setCachedDownloadRecord(target, record);
+  const performance = currentPerformanceSummary();
+  await Promise.all([
+    writeFile(target, getDownloadReportPath(), buildDownloadReportHtml(record, target.label || "")),
+    writeLocalDatabaseFiles(target, items, record),
+    writeFile(target, "data/.appdata/download-log.json", JSON.stringify(logReport, null, 2) + "\n"),
+    performance
+      ? writeFile(target, "data/.appdata/performance-summary.json", JSON.stringify(performance, null, 2) + "\n")
+      : Promise.resolve(),
+  ]);
+  artifactCheckpoint.itemsSinceFull = 0;
+  artifactCheckpoint.lastFullAt = now;
+  recordStage("artifact_full_write", timingNow() - fullStartedAt, {
+    ok: true,
+    items: items.length,
+    logs: logs.length,
+  });
+  return { full: true, record };
 }
 
 function buildLocalDatabase(items, record) {
@@ -442,7 +674,7 @@ async function resetDownloadStateForFreshFolder() {
 }
 
 function logLine(text, meta = null) {
-  addLog(text, "info", meta).then(render).catch(console.error);
+  addLog(text, "info", meta).then(() => scheduleRender()).catch(console.error);
 }
 
 function safeUrl(url) {
@@ -624,7 +856,7 @@ function escapeHtml(value) {
   }[char]));
 }
 
-async function render() {
+async function renderContent() {
   const state = await summarize();
   const items = await getAll("items");
   const followingAuthors = buildFollowingAuthors(items);
@@ -642,8 +874,18 @@ async function render() {
   const recordCursorItem = [...recordItems]
     .filter((item) => item.downloadStatus && item.downloadStatus !== "not_started")
     .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
-  $("likedSummaryCount").textContent = folderRecord?.likedTotal ?? 0;
-  $("bookmarkedSummaryCount").textContent = folderRecord?.bookmarkedTotal ?? 0;
+  $("likedSummaryCount").textContent = remoteProfileSummary.likedTotal ?? folderRecord?.likedTotal ?? 0;
+  $("bookmarkedSummaryCount").textContent = remoteProfileSummary.bookmarkedTotal ?? folderRecord?.bookmarkedTotal ?? 0;
+  $("remoteSummaryMeta").textContent = remoteProfileSummary.status === "loaded"
+    ? "Official counts in " + Math.round(remoteProfileSummary.durationMs) + "ms"
+      + (remoteProfileSummary.nickname ? " | " + remoteProfileSummary.nickname : "")
+    : (remoteProfileSummary.status === "loading"
+      ? "Loading official counts..."
+      : (remoteProfileSummary.error || "Official counts not loaded"));
+  const performanceText = formatPerformanceSummary(currentPerformanceSummary())
+    || "Performance timing starts with the next download task";
+  $("performanceSummary").textContent = performanceText;
+  $("downloadTaskPerformanceSummary").textContent = performanceText;
   $("likedSummaryCursor").textContent = recordCurrent?.total
     ? `${recordCurrent.completed || 0} / ${recordCurrent.total || 0}`
     : "-";
@@ -706,6 +948,9 @@ async function render() {
   updateButtons();
 }
 
+async function render() {
+  return await timedStage("ui_render", () => renderContent());
+}
 async function saveCurrentConfig() {
   await saveConfig({ ...await loadConfig(), ...configFromForm() });
 }
@@ -1075,7 +1320,7 @@ async function syncNextLikedPage(config) {
 let lastLikedPageRequestAt = 0;
 
 async function startLikedScan() {
-  const profileResult = await sendPageRequest("GET_SELF_PROFILE", {}, 30000);
+  const profileResult = await requestSelfProfile({ maxAgeMs: 10000, reason: "liked_scan" });
   if (!profileResult?.ok) {
     throw new Error("\u559c\u6b22\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u65e0\u6cd5\u8bfb\u53d6\u5f53\u524d\u767b\u5f55\u7528\u6237\uff0c" + resultError(profileResult));
   }
@@ -1106,10 +1351,8 @@ async function startLikedScan() {
 }
 
 async function waitForLikedPageSlot() {
-  const elapsed = Date.now() - lastLikedPageRequestAt;
-  if (elapsed < LIKED_PAGE_MIN_INTERVAL_MS) {
-    await sleep(LIKED_PAGE_MIN_INTERVAL_MS - elapsed);
-  }
+  const waitMs = Math.max(0, LIKED_PAGE_MIN_INTERVAL_MS - (Date.now() - lastLikedPageRequestAt));
+  if (waitMs > 0) await waitTracked("list_throttle_wait", waitMs, { scope: "liked" });
 }
 
 async function requestLikedPageWithRetry(state) {
@@ -1121,12 +1364,12 @@ async function requestLikedPageWithRetry(state) {
       }
       await waitForLikedPageSlot();
       lastLikedPageRequestAt = Date.now();
-      const page = await sendPageRequest("FETCH_LIKED_PAGE", {
+      const page = await timedStage("list_api", () => sendPageRequest("FETCH_LIKED_PAGE", {
         secUid: state.secUid,
         maxCursor: state.maxCursor,
         minCursor: state.minCursor,
         count: LIKED_PAGE_SIZE,
-      }, 60000);
+      }, 60000), { scope: "liked", page: state.page + 1, attempt });
       if (!page?.ok || !Array.isArray(page.awemeList)) {
         throw new Error(resultError(page));
       }
@@ -1149,7 +1392,7 @@ async function requestLikedPageWithRetry(state) {
           error: error?.message || String(error),
         },
       );
-      await sleep(delayMs);
+      await waitTracked("list_retry_wait", delayMs, { scope: "liked", attempt });
     }
   }
   throw new Error(
@@ -1205,7 +1448,7 @@ async function scanNextLikedPage(scanState) {
 let lastBookmarkedPageRequestAt = 0;
 
 async function startBookmarkedScan() {
-  const profileResult = await sendPageRequest("GET_SELF_PROFILE", {}, 30000);
+  const profileResult = await requestSelfProfile({ maxAgeMs: 10000, reason: "bookmarked_scan" });
   if (!profileResult?.ok) {
     throw new Error("\u6536\u85cf\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u65e0\u6cd5\u8bfb\u53d6\u5f53\u524d\u767b\u5f55\u7528\u6237\uff0c" + resultError(profileResult));
   }
@@ -1237,10 +1480,8 @@ async function startBookmarkedScan() {
 }
 
 async function waitForBookmarkedPageSlot() {
-  const elapsed = Date.now() - lastBookmarkedPageRequestAt;
-  if (elapsed < BOOKMARKED_PAGE_MIN_INTERVAL_MS) {
-    await sleep(BOOKMARKED_PAGE_MIN_INTERVAL_MS - elapsed);
-  }
+  const waitMs = Math.max(0, BOOKMARKED_PAGE_MIN_INTERVAL_MS - (Date.now() - lastBookmarkedPageRequestAt));
+  if (waitMs > 0) await waitTracked("list_throttle_wait", waitMs, { scope: "bookmarked" });
 }
 
 async function requestBookmarkedPageWithRetry(state) {
@@ -1252,10 +1493,10 @@ async function requestBookmarkedPageWithRetry(state) {
       }
       await waitForBookmarkedPageSlot();
       lastBookmarkedPageRequestAt = Date.now();
-      const page = await sendPageRequest("FETCH_BOOKMARKED_PAGE", {
+      const page = await timedStage("list_api", () => sendPageRequest("FETCH_BOOKMARKED_PAGE", {
         cursor: state.cursor,
         count: BOOKMARKED_PAGE_SIZE,
-      }, 60000);
+      }, 60000), { scope: "bookmarked", page: state.page + 1, attempt });
       if (!page?.ok || !Array.isArray(page.awemeList)) {
         throw new Error(resultError(page));
       }
@@ -1277,7 +1518,7 @@ async function requestBookmarkedPageWithRetry(state) {
           error: error?.message || String(error),
         },
       );
-      await sleep(delayMs);
+      await waitTracked("list_retry_wait", delayMs, { scope: "bookmarked", attempt });
     }
   }
   throw new Error(
@@ -1344,28 +1585,67 @@ async function downloadOne(item, rootHandle, config) {
   let videoUrl = item.videoUrl || "";
   let coverUrl = item.coverUrl || "";
   let detail = null;
-  let candidate = null;
-  let fallbackCandidate = null;
-  let rankedCandidates = [];
-  if (config.downloadPreferBestQuality || !videoUrl || (config.downloadCovers && !coverUrl)) {
+  const candidatesFetchedAt = Date.parse(item.videoCandidatesFetchedAt || "");
+  const candidateAgeMs = Date.now() - candidatesFetchedAt;
+  const cachedCandidatesFresh = Array.isArray(item.videoCandidates)
+    && item.videoCandidates.length > 0
+    && Number.isFinite(candidateAgeMs)
+    && candidateAgeMs >= 0
+    && candidateAgeMs <= CANDIDATE_CACHE_MAX_AGE_MS;
+  let rankedCandidates = cachedCandidatesFresh ? item.videoCandidates.filter((entry) => entry?.url) : [];
+  let fallbackCandidate = cachedCandidatesFresh && item.videoFallbackCandidate?.url
+    ? item.videoFallbackCandidate
+    : null;
+  let candidate = config.downloadPreferBestQuality
+    ? rankedCandidates[0] || null
+    : fallbackCandidate || rankedCandidates[0] || null;
+  if (candidate?.url) videoUrl = candidate.url;
+  if (cachedCandidatesFresh) {
+    recordStage("download_candidates_reused", 0, {
+      ok: true,
+      awemeId: item.awemeId,
+      candidates: rankedCandidates.length,
+      ageMs: candidateAgeMs,
+    });
+    logLine(
+      `\u590d\u7528\u5217\u8868\u89c6\u9891\u5019\u9009\uff1a#${item.index} ${item.awemeId} ${rankedCandidates.length} \u4e2a\uff0c\u7701\u7565\u91cd\u590d\u8be6\u60c5\u8bf7\u6c42`,
+      {
+        type: "download_candidates_reused",
+        awemeId: item.awemeId,
+        index: item.index,
+        candidates: rankedCandidates.length,
+        ageMs: candidateAgeMs,
+      },
+    );
+  }
+
+  const needsDetail = !videoUrl
+    || (config.downloadPreferBestQuality && !rankedCandidates.length)
+    || (config.downloadCovers && !coverUrl);
+  if (needsDetail) {
     logLine("\u6b63\u5728\u83b7\u53d6\u4f5c\u54c1\u8be6\u60c5\uff1a#" + item.index + " " + item.awemeId, {
       type: "download_detail_started",
       awemeId: item.awemeId,
       index: item.index,
     });
-    detail = await sendPageRequest("FETCH_AWEME_DETAIL", { awemeId: item.awemeId }, 30000);
+    detail = await timedStage(
+      "detail_api",
+      () => sendPageRequest("FETCH_AWEME_DETAIL", { awemeId: item.awemeId }, 30000),
+      { awemeId: item.awemeId, index: item.index },
+    );
     if (!detail.ok) throw new Error(`详情获取失败：${resultError(detail)}`);
-    rankedCandidates = pickVideoCandidates(detail.aweme, { preferBestQuality: config.downloadPreferBestQuality });
-    candidate = rankedCandidates[0] || null;
+    rankedCandidates = pickVideoCandidates(detail.aweme, {
+      preferBestQuality: config.downloadPreferBestQuality,
+    });
     fallbackCandidate = pickVideoUrl(detail.aweme, { preferBestQuality: false });
+    candidate = config.downloadPreferBestQuality
+      ? rankedCandidates[0] || fallbackCandidate
+      : fallbackCandidate || rankedCandidates[0] || null;
     videoUrl = candidate?.url || videoUrl;
     coverUrl = detail.coverUrl || coverUrl;
   }
   if (!videoUrl) throw new Error("未找到可下载视频地址");
-  if (!candidate && detail?.aweme) {
-    rankedCandidates = pickVideoCandidates(detail.aweme, { preferBestQuality: config.downloadPreferBestQuality });
-    candidate = rankedCandidates[0] || null;
-  }
+  if (!candidate) candidate = { url: videoUrl, source: "list" };
   if (!rankedCandidates.length && candidate?.url) rankedCandidates = [candidate];
   downloadBatchState.currentResolution = describeVideoCandidate(candidate);
   updateDownloadBatchProgress();
@@ -1392,6 +1672,7 @@ async function downloadOne(item, rootHandle, config) {
       videoUrl = candidate.url;
       downloadBatchState.currentResolution = describeVideoCandidate(candidate);
       updateDownloadBatchProgress();
+      const attemptStartedAt = timingNow();
       try {
         const result = await downloadVerifiedMedia(
           rootHandle,
@@ -1399,6 +1680,11 @@ async function downloadOne(item, rootHandle, config) {
           videoUrl,
           { expected: "video" },
         );
+        recordMediaTimings(result, {
+          kind: "video",
+          awemeId: item.awemeId,
+          candidateRank: index + 1,
+        });
         videoPrecheck = result.precheck || {
           ok: true,
           contentType: result.contentType || "video/mp4",
@@ -1422,6 +1708,12 @@ async function downloadOne(item, rootHandle, config) {
         );
         break;
       } catch (error) {
+        recordStage("video_attempt_failed", timingNow() - attemptStartedAt, {
+          ok: false,
+          awemeId: item.awemeId,
+          candidateRank: index + 1,
+          error: error?.message || String(error),
+        });
         directErrors.push("#" + (index + 1) + " " + describeVideoCandidate(candidate) + " " + error.message);
         logLine(
           "\u89c6\u9891\u4e0b\u8f7d\u5019\u9009\u5931\u8d25\uff1a#" + item.index + " " + item.awemeId
@@ -1515,12 +1807,16 @@ async function downloadOne(item, rootHandle, config) {
 
   if (config.downloadCovers && coverUrl) {
     if (rootHandle.kind === "filesystem") {
-      await downloadVerifiedMedia(
+      const coverResult = await downloadVerifiedMedia(
         rootHandle,
         coverPath,
         coverUrl,
         { expected: "image" },
       );
+      recordMediaTimings(coverResult, {
+        kind: "cover",
+        awemeId: item.awemeId,
+      });
     } else {
       await sendPageRequest("PRECHECK_URL", {
         url: coverUrl,
@@ -1550,7 +1846,11 @@ async function downloadOne(item, rootHandle, config) {
       cover: config.downloadCovers && coverUrl ? coverPath : null,
     },
   };
-  await writeFile(rootHandle, manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await timedStage(
+    "manifest_write",
+    () => writeFile(rootHandle, manifestPath, `${JSON.stringify(manifest, null, 2)}\n`),
+    { awemeId: item.awemeId },
+  );
 
   await saveItem(patchItem(item, {
     videoUrl,
@@ -1703,19 +2003,19 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
           },
         );
       }
-      await persistDownloadArtifacts(rootHandle, downloadBatchState);
+      await persistDownloadArtifacts(rootHandle, downloadBatchState, { itemCompleted: true });
       updateDownloadBatchProgress();
       await render();
       if (consecutiveFailures >= 8) {
         throw new Error("\u8fde\u7eed 8 \u4e2a\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\uff0c\u5df2\u505c\u6b62\u4ee5\u907f\u514d\u7ee7\u7eed\u89e6\u53d1\u9650\u5236");
       }
-      await sleep(randomDelay(config));
+      await waitTracked("item_delay", randomDelay(config), { scope: "liked" });
     }
   }
 
   if (downloadPauseRequested) {
     downloadBatchState.phase = "\u5df2\u6682\u505c";
-    await persistDownloadArtifacts(rootHandle, downloadBatchState);
+    await persistDownloadArtifacts(rootHandle, downloadBatchState, { forceFull: true });
     logLine(
       "\u559c\u6b22\u89c6\u9891\u4e0b\u8f7d\u5df2\u6682\u505c\uff1a\u68c0\u67e5\u5230 " + scanState.checked
         + "\uff0c\u672c\u6b21\u4e0b\u8f7d " + downloaded + "\uff0c\u5931\u8d25 " + failed,
@@ -1737,7 +2037,7 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
     setConfig("likedSyncCompletedAt", new Date().toISOString()),
     setConfig("likedSyncCompletedCount", scanState.checked),
   ]);
-  await persistDownloadArtifacts(rootHandle, downloadBatchState);
+  await persistDownloadArtifacts(rootHandle, downloadBatchState, { forceFull: true });
   if (!pendingFound) {
     logLine(
       "\u559c\u6b22\u5217\u8868\u83b7\u53d6\u6210\u529f\uff1a\u68c0\u67e5\u5230 " + scanState.checked
@@ -1873,19 +2173,19 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
           },
         );
       }
-      await persistDownloadArtifacts(rootHandle, downloadBatchState);
+      await persistDownloadArtifacts(rootHandle, downloadBatchState, { itemCompleted: true });
       updateDownloadBatchProgress();
       await render();
       if (consecutiveFailures >= 8) {
         throw new Error("\u8fde\u7eed 8 \u4e2a\u6536\u85cf\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\uff0c\u5df2\u505c\u6b62\u4ee5\u907f\u514d\u7ee7\u7eed\u89e6\u53d1\u9650\u5236");
       }
-      await sleep(randomDelay(config));
+      await waitTracked("item_delay", randomDelay(config), { scope: "bookmarked" });
     }
   }
 
   if (downloadPauseRequested) {
     downloadBatchState.phase = "\u5df2\u6682\u505c";
-    await persistDownloadArtifacts(rootHandle, downloadBatchState);
+    await persistDownloadArtifacts(rootHandle, downloadBatchState, { forceFull: true });
     logLine(
       "\u6536\u85cf\u89c6\u9891\u4e0b\u8f7d\u5df2\u6682\u505c\uff1a\u68c0\u67e5\u5230 " + scanState.checked
         + "\uff0c\u672c\u6b21\u4e0b\u8f7d " + downloaded + "\uff0c\u5931\u8d25 " + failed,
@@ -1907,7 +2207,7 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
     setConfig("bookmarkedSyncCompletedAt", new Date().toISOString()),
     setConfig("bookmarkedSyncCompletedCount", scanState.checked),
   ]);
-  await persistDownloadArtifacts(rootHandle, downloadBatchState);
+  await persistDownloadArtifacts(rootHandle, downloadBatchState, { forceFull: true });
   if (!pendingFound) {
     logLine(
       "\u6536\u85cf\u5217\u8868\u83b7\u53d6\u6210\u529f\uff1a\u68c0\u67e5\u5230 " + scanState.checked
@@ -1942,6 +2242,9 @@ async function runDownloadBatch(scope = "liked") {
   downloadRunning = true;
   downloadPauseRequested = false;
   currentDownloadScope = scope;
+  activePerformanceTracker = createPerformanceTracker(scope);
+  lastPerformanceSummary = null;
+  activeDownloadTarget = null;
   setView("download-task");
   const scopeDef = getDownloadScopeDefinition(scope);
   downloadBatchState = {
@@ -1963,10 +2266,15 @@ async function runDownloadBatch(scope = "liked") {
     await saveCurrentConfig();
     await setConfig("lastDownloadScope", scope);
     const config = await loadConfig();
-    const rootHandle = await chooseDownloadTarget({
-      preferBrowserDownloads: false,
-      preferSavedFolder: true,
-    });
+    const rootHandle = await timedStage(
+      "folder_resolve",
+      () => chooseDownloadTarget({
+        preferBrowserDownloads: false,
+        preferSavedFolder: true,
+      }),
+      { scope },
+    );
+    activeDownloadTarget = rootHandle;
     if (rootHandle.kind !== "filesystem") {
       throw new Error("未找到可用的已授权文件夹。请先点击“选择文件夹”，后续下载才不会出现在浏览器下载记录里。");
     }
@@ -2078,7 +2386,7 @@ async function runDownloadBatch(scope = "liked") {
         await downloadOne(item, rootHandle, config);
         downloaded += 1;
         downloadBatchState.completed = downloaded;
-        await persistDownloadArtifacts(rootHandle, downloadBatchState);
+        await persistDownloadArtifacts(rootHandle, downloadBatchState, { itemCompleted: true });
       } catch (error) {
         await saveItem(patchItem(item, { downloadStatus: "failed", lastError: `下载失败：${error.message}` }));
         logLine(`${scopeDef.label}下载失败：#${item.index} ${item.awemeId} ${error.message}`, {
@@ -2088,15 +2396,15 @@ async function runDownloadBatch(scope = "liked") {
           error: error.message,
           scope: scopeDef.key,
         });
-        await persistDownloadArtifacts(rootHandle, downloadBatchState);
+        await persistDownloadArtifacts(rootHandle, downloadBatchState, { itemCompleted: true });
       }
       updateDownloadBatchProgress();
       await render();
-      await sleep(randomDelay(config));
+      await waitTracked("item_delay", randomDelay(config), { scope: scopeDef.key });
     }
     if (!downloadPauseRequested) {
       downloadBatchState.phase = "已完成";
-      await persistDownloadArtifacts(rootHandle, downloadBatchState);
+      await persistDownloadArtifacts(rootHandle, downloadBatchState, { forceFull: true });
       logLine(`${scopeDef.label}下载批次结束：完成 ${downloaded} 条`, {
         type: "download_batch_finished",
         completed: downloaded,
@@ -2108,6 +2416,7 @@ async function runDownloadBatch(scope = "liked") {
     setGlobalStatus("下载异常");
     setDownloadStatus("异常");
     updateDownloadBatchProgress();
+    await finalizeDownloadPerformance();
     logLine(`下载流程异常：${error.message}`);
   } finally {
     await sendRuntimeMessage({ type: "SET_DOWNLOAD_UI", enabled: true });
@@ -2133,8 +2442,8 @@ async function runDownloadBatch(scope = "liked") {
 $("profileBtn").addEventListener("click", async () => {
   try {
     setGlobalStatus("检测中");
-    const result = await sendPageRequest("GET_SELF_PROFILE", {}, 30000);
-    const user = result?.json?.user || result?.json?.user_info || result?.json;
+    const result = await requestSelfProfile({ reason: "manual_profile" });
+    const user = profileUser(result);
     setGlobalStatus(result.ok ? "已连接" : "异常");
     $("pageMeta").textContent = result.ok
       ? `抖音页面已连接：${user?.nickname || user?.uid || "已登录"}`
@@ -2291,4 +2600,5 @@ window.addEventListener("douyin-toolkit-boot", (event) => {
 });
 
 await render();
-setInterval(render, 2500);
+void refreshRemoteProfileSummary({ silent: false });
+setInterval(() => scheduleRender(0), 2500);

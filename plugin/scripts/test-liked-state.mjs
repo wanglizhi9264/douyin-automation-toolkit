@@ -102,6 +102,11 @@ assert.equal(normalized.items[0].downloadStatus, "downloaded");
 assert.equal(normalized.items[0].downloadVideoPath, "data/liked/1.mp4");
 assert.equal(normalized.items[0].desc, "refreshed");
 assert.equal(normalized.items[1].downloadStatus, "not_started");
+assert.ok(normalized.items[0].videoCandidates.length > 0);
+assert.ok(normalized.items[0].videoFallbackCandidate.url);
+assert.ok(normalized.items[0].videoCandidatesFetchedAt);
+assert.ok(normalized.items[1].videoCandidates.length > 0);
+assert.ok(normalized.items[1].videoFallbackCandidate.url);
 
 const qualityCandidates = pickVideoCandidates({
   video: {

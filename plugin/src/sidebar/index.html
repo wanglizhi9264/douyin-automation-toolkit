@@ -23,12 +23,13 @@
       <div class="panel hero-panel">
         <h2>下载总览</h2>
         <div class="grid">
-          <div class="stat"><div class="stat-label">总喜欢数</div><div id="likedSummaryCount" class="stat-value">0</div></div>
-          <div class="stat"><div class="stat-label">&#24635;&#25910;&#34255;&#25968;</div><div id="bookmarkedSummaryCount" class="stat-value">0</div></div>
+          <div class="stat"><div class="stat-label">抖音喜欢</div><div id="likedSummaryCount" class="stat-value">0</div></div>
+          <div class="stat"><div class="stat-label">抖音收藏</div><div id="bookmarkedSummaryCount" class="stat-value">0</div></div>
           <div class="stat"><div class="stat-label">拉取到</div><div id="likedSummaryCursor" class="stat-value">-</div></div>
           <div class="stat"><div class="stat-label">下载到</div><div id="downloadSummaryCursor" class="stat-value">-</div></div>
           <div class="stat"><div class="stat-label">当前分辨率</div><div id="downloadSummaryResolution" class="stat-value compact-value">-</div></div>
         </div>
+        <div id="remoteSummaryMeta" class="meta" style="margin-top:8px">正在读取抖音官方数量...</div>
       </div>
 
       <div class="panel">
@@ -55,6 +56,10 @@
         <div class="meta-block">
           <div class="meta-label">批次进度</div>
           <div id="downloadBatchProgress" class="meta">尚未开始下载</div>
+        </div>
+        <div class="meta-block">
+          <div class="meta-label">性能分析</div>
+          <div id="performanceSummary" class="meta">下一次下载任务开始计时</div>
         </div>
         <div class="meta-block">
           <div class="meta-label">下载记录目录</div>
@@ -166,6 +171,10 @@
             <div id="downloadTaskProgress" class="meta">尚未开始下载</div>
           </div>
           <div class="meta-block">
+          <div class="meta-block">
+            <div class="meta-label">性能分析</div>
+            <div id="downloadTaskPerformanceSummary" class="meta">下一次下载任务开始计时</div>
+          </div>
             <div class="meta-label">下载记录目录</div>
             <div id="downloadTaskTargetMeta" class="meta">尚未选择文件夹</div>
           </div>

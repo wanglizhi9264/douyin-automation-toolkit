@@ -86,6 +86,10 @@ try {
   );
   assert.equal(result.ok, true);
   assert.equal(result.precheck.contentLength, 8);
+  assert.ok(result.timings.requestMs >= 0);
+  assert.ok(result.timings.transferMs >= 0);
+  assert.ok(result.timings.writeMs >= 0);
+  assert.ok(result.timings.totalMs >= 0);
   assert.equal(mediaFetchCount, 1, "verified media must be fetched exactly once");
   assert.equal(writtenFiles.get("data/\u70b9\u8d5e/\u89c6\u9891/123.mp4").size, 8);
   assert.equal(writtenFiles.get("data/\u70b9\u8d5e/\u89c6\u9891/123.mp4").type, "video/mp4");

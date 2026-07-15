@@ -39,6 +39,7 @@ npm run check
 | `test-bookmarked-sync.mjs` | 收藏分页、POST 表单、节流常量、同 ID 作用域隔离 |
 | `test-liked-sync.mjs` | 喜欢页运行时请求和完整扫描循环 |
 | `test-liked-state.mjs` | 喜欢归一化、状态合并和最高画质排序 |
+| `test-performance.mjs` | 阶段统计、快速官方总数、候选复用、检查点批量刷新和性能文件 |
 
 测试失败不能通过删除断言或只放宽校验解决。先判断实现缺陷还是规格变更；规格变更必须同步更新产品规格和设计。
 
@@ -55,6 +56,7 @@ npm run check
 | FR-07 文件写入 | `test-download-target` | 视频、封面、状态、`db_bookmarked` 路径正确 |
 | FR-08 暂停继续 | 记录恢复与静态断言 | 暂停、刷新、继续后跳过已下载项 |
 | FR-09 可观测性 | 扩展检查与静态断言 | UI 北京时间，日志可定位失败 |
+| FR-09 可观测性 | `test-performance`、扩展检查 | 快速总数与性能文件能区分网络、主动等待和磁盘开销 |
 
 ## 5. 人工冒烟测试
 
@@ -64,6 +66,8 @@ npm run check
 - 打开 `www.douyin.com` 后侧边栏可打开和关闭。
 - 未登录时点击下载得到明确登录提示，不显示空任务完成。
 - UI 日志时间与北京时间一致。
+- 打开侧边栏后无需扫描列表即可显示“抖音喜欢/抖音收藏”官方总数，并显示个人资料请求耗时。
+- 官方总数与本地已下载、已扫描数量分开展示。
 
 ### 5.2 文件夹记忆
 
@@ -127,12 +131,13 @@ npm run check
 
 出现问题时按优先级收集：
 
-1. `data/.appdata/download-log.json`。
-2. `data/.appdata/download-state.json`。
-3. `data/.appdata/db_likes.json` 或 `db_bookmarked.json`。
-4. `本地库.html`。
-5. 侧边栏最近日志截图。
-6. 扩展版本、浏览器版本、失败 awemeId 和发生时间。
+1. `data/.appdata/performance-summary.json`。
+2. `data/.appdata/download-log.json`。
+3. `data/.appdata/download-state.json`。
+4. `data/.appdata/db_likes.json` 或 `db_bookmarked.json`。
+5. `本地库.html`。
+6. 侧边栏最近日志截图。
+7. 扩展版本、浏览器版本、失败 awemeId 和发生时间。
 
 提交问题前必须移除 Cookie、Token、Authorization、签名参数、真实绝对路径和无关个人内容。
 
@@ -163,6 +168,11 @@ awemeId：
 | 继续下载跑错列表 | `current.scope`、`lastDownloadScope` | 以文件夹 scope 为准并补恢复测试 |
 | 文件夹反复选择 | `downloadTarget` 句柄权限 | 重新授权并检查是否清除站点数据 |
 | 大量连续失败 | 登录态、CDN、风控 | 依赖 8 次失败熔断，人工确认后再继续 |
+| 打开侧栏总数慢 | `profile_api` | 若耗时高是资料接口或页面桥问题，不是列表扫描 |
+| 每页推进慢 | `list_throttle_wait`、`list_api` | 主动等待高属风控节流；接口高才检查网络或登录态 |
+| 小视频仍很慢 | `detail_api`、`video_request`、`video_transfer`、`video_write` | 分别判断重复详情、CDN 首包、网速和磁盘 |
+| 每条结束卡顿 | `checkpoint_write`、`artifact_full_write`、`ui_render` | 检查点应轻量；完整资产只应分批出现 |
+| 总时间高但网络快 | `item_delay`、`list_throttle_wait` | 这是主动保护等待，不能归因于带宽 |
 
 ## 9. 发布流程
 

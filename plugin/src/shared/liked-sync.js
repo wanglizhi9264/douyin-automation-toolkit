@@ -84,6 +84,13 @@ function mergeLikedItem(normalized, existing) {
     url: normalized.url || existing?.url || "",
     coverUrl: normalized.coverUrl || existing?.coverUrl || "",
     videoUrl: normalized.videoUrl || existing?.videoUrl || "",
+    videoCandidates: normalized.videoCandidates?.length
+      ? normalized.videoCandidates
+      : (existing?.videoCandidates || []),
+    videoFallbackCandidate: normalized.videoFallbackCandidate?.url
+      ? normalized.videoFallbackCandidate
+      : (existing?.videoFallbackCandidate || null),
+    videoCandidatesFetchedAt: normalized.videoCandidatesFetchedAt || existing?.videoCandidatesFetchedAt || "",
     downloadStatus: existing?.downloadStatus || "not_started",
     lastError: existing?.lastError || "",
     createdAt: existing?.createdAt || normalized.createdAt,
