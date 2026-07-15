@@ -2,7 +2,7 @@ import { sendPageRequest } from "../shared/events.js";
 import { addLog, getAll, getConfig, putItems, setConfig } from "../shared/db.js";
 import { DEFAULT_CONFIG, importProgress, loadConfig, saveConfig, summarize } from "../shared/state.js";
 import { describeVideoCandidate, normalizeAweme, pickVideoCandidates, pickVideoUrl } from "../shared/api.js";
-import { chooseDownloadTarget, downloadUrl, getStoredDownloadTarget, readTextFile, writeFile } from "../shared/download.js";
+import { chooseDownloadTarget, downloadUrl, downloadVerifiedMedia, getStoredDownloadTarget, readTextFile, writeFile } from "../shared/download.js";
 import { recoverDownloadedRecords } from "../shared/download-record.js";
 import {
   advanceLikedScanState,
@@ -1239,12 +1239,12 @@ async function downloadOne(item, rootHandle, config) {
       downloadBatchState.currentResolution = describeVideoCandidate(candidate);
       updateDownloadBatchProgress();
       try {
-        const result = await sendPageRequest("DOWNLOAD_TO_FOLDER", {
-          rootHandle: rootHandle.handle,
-          relativePath: videoPath,
-          url: videoUrl,
-          options: { expected: "video" },
-        }, 120000);
+        const result = await downloadVerifiedMedia(
+          rootHandle,
+          videoPath,
+          videoUrl,
+          { expected: "video" },
+        );
         videoPrecheck = result.precheck || {
           ok: true,
           contentType: result.contentType || "video/mp4",
@@ -1296,12 +1296,12 @@ async function downloadOne(item, rootHandle, config) {
     videoPrecheck = selected.precheck;
     selectedCandidateRank = selected.rank;
     if (rootHandle.kind === "filesystem") {
-      await sendPageRequest("DOWNLOAD_TO_FOLDER", {
-        rootHandle: rootHandle.handle,
-        relativePath: videoPath,
-        url: videoUrl,
-        options: { expected: "video", precheck: videoPrecheck },
-      }, 120000);
+      await downloadVerifiedMedia(
+        rootHandle,
+        videoPath,
+        videoUrl,
+        { expected: "video" },
+      );
     } else {
       logLine("\u63d0\u4ea4 Chrome \u89c6\u9891\u4e0b\u8f7d\uff1a" + videoPath, {
         type: "download_video_submitted",
@@ -1342,12 +1342,12 @@ async function downloadOne(item, rootHandle, config) {
       url: videoUrl,
     });
     if (rootHandle.kind === "filesystem") {
-      await sendPageRequest("DOWNLOAD_TO_FOLDER", {
-        rootHandle: rootHandle.handle,
-        relativePath: videoPath,
-        url: videoUrl,
-        options: { expected: "video", precheck: fallbackPrecheck },
-      }, 120000);
+      await downloadVerifiedMedia(
+        rootHandle,
+        videoPath,
+        videoUrl,
+        { expected: "video" },
+      );
     } else {
       logLine("\u63d0\u4ea4 Chrome \u56de\u9000\u89c6\u9891\u4e0b\u8f7d\uff1a" + videoPath, {
         type: "download_video_fallback_submitted",
@@ -1361,12 +1361,12 @@ async function downloadOne(item, rootHandle, config) {
 
   if (config.downloadCovers && coverUrl) {
     if (rootHandle.kind === "filesystem") {
-      await sendPageRequest("DOWNLOAD_TO_FOLDER", {
-        rootHandle: rootHandle.handle,
-        relativePath: coverPath,
-        url: coverUrl,
-        options: { expected: "image" },
-      }, 120000);
+      await downloadVerifiedMedia(
+        rootHandle,
+        coverPath,
+        coverUrl,
+        { expected: "image" },
+      );
     } else {
       await sendPageRequest("PRECHECK_URL", {
         url: coverUrl,

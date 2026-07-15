@@ -82,6 +82,20 @@ chrome.runtime.onMessage.addListener((message) => {
   return false;
 });
 
+
+function postToPage(data) {
+  try {
+    window.postMessage({ ...data, source: "douyin-toolkit-content" }, location.origin);
+  } catch (error) {
+    postToSidebar({
+      source: "douyin-toolkit-page",
+      requestId: data?.requestId,
+      type: data?.type,
+      payload: null,
+      error: "\u9875\u9762\u6d88\u606f\u8f6c\u53d1\u5931\u8d25\uff1a" + (error?.message || String(error)),
+    });
+  }
+}
 window.addEventListener("message", (event) => {
   if (event.source === window && event.data && event.data.source === "douyin-toolkit-page") {
     postToSidebar(event.data);
@@ -92,7 +106,7 @@ window.addEventListener("message", (event) => {
       removeSidebar();
       return;
     }
-    window.postMessage({ ...event.data, source: "douyin-toolkit-content" }, location.origin);
+    postToPage(event.data);
   }
 });
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音收藏备份助手",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "本地管理抖音喜欢列表收藏、审计和视频备份。",
   "action": {
     "default_title": "抖音收藏备份助手"
@@ -24,7 +24,11 @@
     "https://*.byteimg.com/*",
     "https://*.bytecdntp.com/*",
     "https://*.bytedance.com/*",
-    "https://*.snssdk.com/*"
+    "https://*.snssdk.com/*",
+    "https://*.zjcdn.com/*",
+    "https://*.pstatp.com/*",
+    "https://*.bytecdn.cn/*",
+    "https://*.ibytedtos.com/*"
   ],
   "content_scripts": [
     {

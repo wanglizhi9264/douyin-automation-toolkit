@@ -161,6 +161,90 @@ export async function readTextFile(target, relativePath) {
   return await (await file.getFile()).text();
 }
 
+export async function downloadVerifiedMedia(target, relativePath, url, {
+  expected = "video",
+  headerTimeoutMs = 30000,
+  totalTimeoutMs = 120000,
+} = {}) {
+  if (target?.kind !== "filesystem" || !target.handle) {
+    throw new Error("\u5a92\u4f53\u6587\u4ef6\u5fc5\u987b\u5199\u5165\u5df2\u6388\u6743\u6587\u4ef6\u5939");
+  }
+  const controller = new AbortController();
+  let phase = "request";
+  const headerTimeout = setTimeout(() => controller.abort(), headerTimeoutMs);
+  const totalTimeout = setTimeout(() => controller.abort(), totalTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      credentials: "omit",
+      signal: controller.signal,
+      headers: { "accept": "*/*" },
+    });
+    phase = "download";
+    clearTimeout(headerTimeout);
+    const contentType = response.headers.get("content-type") || "";
+    const contentLength = Number(response.headers.get("content-length") || 0);
+    const acceptRanges = response.headers.get("accept-ranges") || "";
+    if (response.status === 206) {
+      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u610f\u5916\u6536\u5230\u5206\u6bb5\u54cd\u5e94 206");
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1aHTTP " + response.status);
+    }
+    if (expected === "video" && !contentType.includes("video/mp4")) {
+      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u89c6\u9891 MIME \u4e3a " + (contentType || "unknown"));
+    }
+    if (expected === "image" && !contentType.startsWith("image/")) {
+      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u5c01\u9762 MIME \u4e3a " + (contentType || "unknown"));
+    }
+    if (expected === "video" && !contentLength) {
+      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u672a\u8fd4\u56de\u89c6\u9891\u5927\u5c0f");
+    }
+    const blob = await response.blob();
+    if (!blob.size) {
+      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a0 \u5b57\u8282");
+    }
+    if (contentLength && blob.size !== contentLength) {
+      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u5927\u5c0f\u4e0d\u4e00\u81f4 " + blob.size + "/" + contentLength);
+    }
+    phase = "write";
+    await writeFile(target, relativePath, blob);
+    return {
+      ok: true,
+      size: blob.size,
+      contentType: blob.type || contentType,
+      precheck: {
+        ok: true,
+        httpStatus: response.status,
+        contentType,
+        contentLength: blob.size,
+        acceptRanges,
+        sizeLabel: (blob.size / 1024 / 1024).toFixed(1) + "MB",
+      },
+    };
+  } catch (error) {
+    controller.abort();
+    if (error?.name === "AbortError") {
+      if (phase === "request") {
+        throw new Error("\u7b49\u5f85\u5a92\u4f53\u54cd\u5e94\u8d85\u8fc7 " + Math.round(headerTimeoutMs / 1000) + " \u79d2");
+      }
+      throw new Error("\u5a92\u4f53\u4e0b\u8f7d\u8d85\u8fc7 " + Math.round(totalTimeoutMs / 1000) + " \u79d2");
+    }
+    const message = error?.message || String(error);
+    if (message.startsWith("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25")) throw error;
+    if (phase === "write") {
+      throw new Error("\u6587\u4ef6\u5199\u5165\u5931\u8d25\uff1a" + message);
+    }
+    let host = "unknown-host";
+    try {
+      host = new URL(url).host;
+    } catch {}
+    throw new Error("\u6269\u5c55\u6293\u53d6\u5931\u8d25(" + host + ")\uff1a" + message);
+  } finally {
+    clearTimeout(headerTimeout);
+    clearTimeout(totalTimeout);
+  }
+}
+
 export async function downloadUrl(target, relativePath, url) {
   if (target.kind === "downloads") {
     return await downloadWithChromeDownloads({

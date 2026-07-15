@@ -90,6 +90,23 @@ assert.equal(frame.style.display, "none", "toolbar click should hide an open sid
 runtimeListeners[0]({ type: "TOGGLE_SIDEBAR" });
 assert.equal(frame.style.display, "block", "second toolbar click should show the sidebar");
 
+const forwardedBeforeCloneError = forwarded.length;
+globalThis.window.postMessage = () => {
+  throw new DOMException("clone failed", "DataCloneError");
+};
+windowListeners.get("message")({
+  origin: "chrome-extension://test-extension",
+  data: {
+    source: "douyin-toolkit-sidebar",
+    requestId: "clone-error-1",
+    type: "TEST_CLONE_ERROR",
+    payload: {},
+  },
+});
+assert.equal(forwarded.length, forwardedBeforeCloneError + 1);
+assert.equal(forwarded.at(-1).data.requestId, "clone-error-1");
+assert.match(forwarded.at(-1).data.error, /clone failed/);
+
 runtimeListeners[0]({ type: "CLOSE_SIDEBAR" });
 assert.equal(elements.has("douyin-toolkit-sidebar"), false, "close should remove the sidebar");
 runtimeListeners[0]({ type: "TOGGLE_SIDEBAR" });
