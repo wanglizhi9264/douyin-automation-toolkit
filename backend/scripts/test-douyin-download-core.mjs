@@ -9,6 +9,8 @@ import {
   inferPreviousSnapshot,
   loadDownloadRecord,
   mediaRelativePaths,
+  mediaPartCandidates,
+  mediaPartRelativePath,
   normalizeDownloadRecord,
   recordPaths,
   reconcileListSnapshot,
@@ -92,6 +94,28 @@ const likedPaths = mediaRelativePaths("liked", "100");
 const bookmarkedPaths = mediaRelativePaths("bookmarked", "200");
 assert.equal(likedPaths.video, "data/\u70b9\u8d5e/\u89c6\u9891/100.mp4");
 assert.equal(bookmarkedPaths.video, "data/\u6536\u85cf/\u89c6\u9891/200.mp4");
+
+assert.equal(
+  mediaPartRelativePath("liked", "300", {
+    kind: "image",
+    order: 1,
+    url: "https://example.invalid/photo.webp?x=1",
+  }, 12),
+  "data/点赞/图片/300/01.webp",
+);
+assert.equal(
+  mediaPartRelativePath("bookmarked", "400", { kind: "video", order: 2 }, 12),
+  "data/收藏/视频/400/02.mp4",
+);
+const rankedPart = {
+  candidates: [{ url: "best", width: 2160 }, { url: "second", width: 1080 }],
+  fallbackCandidate: { url: "fallback", width: 720 },
+};
+assert.deepEqual(
+  mediaPartCandidates(rankedPart, true).map((candidate) => candidate.url),
+  ["best", "second", "fallback"],
+);
+assert.deepEqual(mediaPartCandidates(rankedPart, false).map((candidate) => candidate.url), ["fallback"]);
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "douyin-download-record-"));
 try {

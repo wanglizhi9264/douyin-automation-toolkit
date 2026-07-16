@@ -48,19 +48,20 @@ flowchart LR
 - 绑定按钮、显示状态、记录北京时间日志。
 - 编排喜欢和收藏的“扫描一页、归一化、跳过、下载、持久化”循环。
 - 管理暂停、连续失败保险、账号隔离和继续下载入口。
-- 每个作品调用统一的 `downloadOne`，不同来源共享同一套最高画质和校验逻辑。
+- 每个作品调用统一的 `downloadOne`；含图片或多个视频分段时进入 segmented 流程，普通单视频保留原路径。
 
 ### 3.4 `liked-sync.js` 与 `bookmarked-sync.js`
 
 - 解析当前用户和预计总数。
 - 封装分页状态，防止 UI 层散落游标判断。
-- 将 API aweme 归一化为本地 item。
+- 将 API aweme 归一化为带 `mediaParts` 的本地 item，图文不再在同步层丢弃。
 - 只合并同一作用域的历史 item，避免喜欢和收藏互相继承下载状态。
 
 ### 3.5 `shared/api.js`
 
-- 汇集并去重视频候选。
-- 计算普通兼容排序和最高画质排序。
+- 从 `images`、live-photo 嵌套视频和显式视频数组提取有序媒体分段。
+- 为每个视频分段汇集去重候选，并计算普通兼容排序和最高画质排序。
+- 根据图片/视频数量计算 `mediaType`。
 - 生成可写入日志的 codec、分辨率、fps、码率和大小描述。
 
 ### 3.6 `shared/db.js`
@@ -79,9 +80,9 @@ flowchart LR
 
 ### 3.8 `download-record.js`
 
-- 从目标文件夹 `download-state.json` 恢复已下载状态。
+- 从目标文件夹 `download-state.json` 恢复已完成作品和部分完成的媒体分段。
 - 匹配键是 `source + awemeId`。
-- 记录没有 source 时，使用当前下载 scope 作为 `defaultSource`。
+- 部分完成作品恢复为可继续状态，并保留 `downloadedMediaParts` 以跳过已完成段。
 
 ## 4. 消息协议
 
@@ -160,8 +161,26 @@ bookmarked:765...
 | lastError | 文本 | 最后失败原因 |
 | downloadQualityLabel | 例如 h265 1440x2560 | 最终画质摘要 |
 | downloadVideoPath | 相对路径 | 目标目录中的视频路径 |
+| mediaType | video、multi_video、image、multi_image、mixed | 作品媒体类型 |
+| mediaParts | 有序数组 | 每段地址、角色、序号和视频候选 |
+| downloadedMediaParts | partId 映射 | 已完成段的路径、大小、MIME 和实际画质 |
+| downloadMediaPaths | 相对路径数组 | 图文或多段作品的全部内容路径 |
 
 收藏列表归一化时强制 `source=bookmarked`、`status=already_favorited`、`collectStat=1`；只从已有 bookmarked 记录继承下载状态。
+
+### 6.1 多媒体分段模型
+
+`extractMediaParts(aweme)` 先按 API 顺序提取 `images[]`，再提取图片项的 live-photo 视频和显式视频数组。每段生成稳定 `partId`；去重只在相同 kind 与 URL 内进行。
+
+```text
+aweme -> mediaParts[] -> mediaType
+                    -> downloadedMediaParts[partId]
+                    -> manifest.parts / files.media
+```
+
+分段路径用两位以上序号保持排序。每完成一段就保存 IndexedDB 和轻量文件夹检查点；最终 manifest 和作品 `downloaded` 状态只在全部内容段齐全后写入。暂停错误使用独立标记穿过外层循环，因此不会增加失败计数。
+
+backend 直接导入共享解析函数，并使用相同 `partId`、候选排序与文件路径。两端的记录 schema 都允许保留未知扩展字段，保证同一备份目录可以交替续跑。
 
 ## 7. 最高画质选择
 
@@ -230,7 +249,8 @@ bookmarked:765...
 
 汇总按阶段输出 count、total、average、P50、P95、max、failures。传输阶段额外聚合 bytes 和 MB/s。按 total 排序的前五项是当前任务瓶颈；主动等待与网络耗时必须分开解释，不能把限流等待误判为网速。
 
-侧边栏首次打开只调用一次 `GET_SELF_PROFILE` 获取 `favoriting_count` 和收藏统计字段，因此总数显示速度不依赖完整列表扫描。官方总数、已扫描数和已下载数是三个不同语义。
+侧边栏首次打开先调用 `GET_SELF_PROFILE`。如果个人资料缺少收藏总数，再预取 `listcollection` 第一页并缓存复用；因此不会为了显示总数重复请求第一页。
+远端总数、已扫描数和已下载数是三个不同语义；响应没有总数字段时 UI 保持未知，不用递增扫描数冒充远端总数。
 
 
 
@@ -254,7 +274,7 @@ bookmarked:765...
 | 收藏页请求失败 | 最多 3 次，等待 7s / 14s |
 | 游标不前进 | 立即停止，记录 cursor |
 | 预计总数大于 0 但扫描为 0 | 停止，提示验证码或登录态 |
-| 图文作品 | 跳过并计数 |
+| 图文或多段作品某一分段失败 | 保存已完成 `partId`，作品记失败或暂停；下次只重试未完成段 |
 | 媒体候选无 MP4 或为空 | 尝试下一候选，最终失败落盘 |
 | 文件夹权限失效 | 请求权限；仍失败则停止 |
 | 文件夹账号不匹配 | 停止，要求选择新目录 |

@@ -100,6 +100,14 @@ export async function fetchBookmarkedPage(page, {
       return { ok: false, httpStatus: response.status, text: text.slice(0, 500) };
     }
     const awemeList = json.aweme_list || json.awemeList || [];
+    const totalValue = json.total
+      ?? json.total_count
+      ?? json.collect_count
+      ?? json.collection_count
+      ?? json.data?.total
+      ?? json.data?.total_count
+      ?? json.extra?.total
+      ?? null;
     return {
       ok: response.ok
         && (json.status_code == null || json.status_code === 0)
@@ -110,7 +118,8 @@ export async function fetchBookmarkedPage(page, {
       awemeList,
       hasMore: json.has_more === true || json.has_more === 1 || json.has_more === "1",
       cursor: json.cursor ?? input.cursor,
-      total: Number(json.total ?? json.total_count ?? 0) || 0,
+      total: Number(totalValue || 0) || 0,
+      hasTotal: totalValue != null && Number.isFinite(Number(totalValue)),
     };
   }, { cursor, count });
 }

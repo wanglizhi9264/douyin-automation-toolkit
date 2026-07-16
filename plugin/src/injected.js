@@ -129,7 +129,25 @@ async function fetchBookmarkedPage(cursor = 0, count = 10) {
     awemeList,
     hasMore: asBoolean(result.json?.has_more ?? result.json?.hasMore),
     cursor: result.json?.cursor ?? cursor,
-    total: Number(result.json?.total ?? result.json?.total_count ?? 0) || 0,
+    total: Number(
+      result.json?.total
+        ?? result.json?.total_count
+        ?? result.json?.collect_count
+        ?? result.json?.collection_count
+        ?? result.json?.data?.total
+        ?? result.json?.data?.total_count
+        ?? result.json?.extra?.total
+        ?? 0,
+    ) || 0,
+    hasTotal: [
+      result.json?.total,
+      result.json?.total_count,
+      result.json?.collect_count,
+      result.json?.collection_count,
+      result.json?.data?.total,
+      result.json?.data?.total_count,
+      result.json?.extra?.total,
+    ].some((value) => value != null && Number.isFinite(Number(value))),
   };
 }
 

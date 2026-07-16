@@ -171,23 +171,23 @@ count=<count>
 接口:
 
 ```text
-GET /aweme/v1/web/aweme/listcollection/
+POST /aweme/v1/web/aweme/listcollection/
 ```
 
 状态:
 
-- 已在规格和前期探索中记录
-- 当前主流程没有作为核心依赖长期使用
+- 插件与 backend 收藏下载的主列表接口
+- 页面登录态下使用表单体 `count=10&cursor=<cursor>`
 
-潜在用途:
+当前契约:
 
-- 反向校验收藏结果
-- 做“已收藏下载”模式
-
-建议:
-
-- 继续扩功能前，可优先验证这个接口的分页字段和返回结构
-- 不建议在没必要时把主流程切到这个接口，避免再次引入游标混乱
+- 内容：`aweme_list`
+- 分页：`cursor`、`has_more`
+- 总数兼容：`total`、`total_count`、`collect_count`、`collection_count` 及 `data/extra` 嵌套变体
+- 可信终点：`has_more=false` 且 `cursor=0`
+- 首次响应可作为概览缓存复用，不能为显示总数再请求一次第一页
+- 接口没有 total 时保留“远端总数未知”，扫描计数不能冒充远端总数
+- 3 秒最小间隔、最多 3 次和 7 秒/14 秒重试继续适用
 
 ### 2.4 作者作品列表
 
@@ -288,6 +288,10 @@ aweme_id=<awemeId>
 - `aweme.create_time`
 - `aweme.video.cover.url_list`
 - `aweme.video.*` 里的视频 URL 候选
+- `aweme.images[]` 中的原图地址
+- 图片项中的 `video`、`video_info` 或 `live_photo.video`
+- 明确返回的 `video_list`、`videos`、`video_segments` 和 `multi_video.*`
+- 视频分段内部的 `bit_rate` 与 `play_addr*` 候选
 
 重要经验:
 

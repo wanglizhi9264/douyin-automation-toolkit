@@ -102,10 +102,14 @@ const normalized = normalizeBookmarkedPageItems([
   },
 ], existing, new Set());
 
-assert.equal(normalized.items.length, 2);
-assert.equal(normalized.skippedImages, 1);
+assert.equal(normalized.items.length, 3);
+assert.equal(normalized.skippedImages, 0);
 const overlap = normalized.items.find((item) => item.awemeId === "same");
 assert.equal(overlap.source, "bookmarked");
+assert.equal(normalized.imageItems, 1);
+const imageItem = normalized.items.find((item) => item.awemeId === "image");
+assert.equal(imageItem.mediaType, "image");
+assert.equal(imageItem.mediaParts.length, 1);
 assert.equal(overlap.downloadStatus, "not_started");
 assert.notEqual(itemKeyFor(overlap), itemKeyFor(existing[0]));
 const saved = normalized.items.find((item) => item.awemeId === "saved");

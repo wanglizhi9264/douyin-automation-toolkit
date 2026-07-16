@@ -1,6 +1,6 @@
 # Backend 下载器
 
-backend 现已提供与浏览器插件一致的喜欢/收藏扫描和续传语义，并继续复用插件中的最高画质候选排序。它适合在桌面 Playwright 环境中长时间执行，也可以直接指向插件已经使用过的备份文件夹。
+backend 0.3.0 提供与浏览器插件一致的喜欢/收藏扫描、远端收藏总数、图文/多段媒体和逐段续传语义，并继续复用插件中的最高画质候选排序。它可以直接指向插件已经使用过的备份文件夹。
 
 ## 安装与登录
 
@@ -67,7 +67,11 @@ npm run douyin:download-resume -- --output "D:\DouyinBackup"
       └─ manifests/<awemeId>.json
 ```
 
-喜欢和收藏使用 `scope:awemeId` 复合键；同一作品同时存在于两个列表时是两条独立记录。backend 能读取插件的记录字段，并写回插件能够恢复的 `source`、`downloadStatus`、画质和文件路径字段。
+喜欢和收藏使用 `scope:awemeId` 复合键；同一作品同时存在于两个列表时是两条独立记录。backend 能读取插件的 `mediaParts` 和 `downloadedMediaParts`，并逐段继续：
+
+- 图文：`data/<点赞|收藏>/图片/<awemeId>/<序号>.<扩展名>`；
+- 多段视频：`data/<点赞|收藏>/视频/<awemeId>/<序号>.mp4`；
+- 普通单视频仍为 `data/<点赞|收藏>/视频/<awemeId>.mp4`，兼容既有备份。
 
 只有列表到达可信终点（`has_more=false` 且终止 cursor 为 0）后才更新快照：
 
@@ -79,7 +83,7 @@ npm run douyin:download-resume -- --output "D:\DouyinBackup"
 
 ## 画质与下载校验
 
-视频详情和候选排序直接复用 `plugin/src/shared/api.js`。默认依次尝试最多 4 个最高画质候选，再保留普通地址作为回退候选。媒体写入前后校验：
+媒体分段解析、视频详情和候选排序直接复用 `plugin/src/shared/api.js`。每个视频分段默认依次尝试最多 4 个最高画质候选，再保留普通地址作为回退候选；每段成功即更新 `download-state.json`。媒体写入前后校验：
 
 - HTTP 必须为 2xx，拒绝 206；
 - 视频必须为 `video/mp4`，封面必须为 `image/*`；

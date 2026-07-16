@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音收藏备份助手",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "本地管理抖音喜欢列表收藏、审计和视频备份。",
   "action": {
     "default_title": "抖音收藏备份助手"

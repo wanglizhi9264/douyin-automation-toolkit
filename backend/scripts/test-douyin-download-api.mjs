@@ -79,7 +79,7 @@ const page = createPage(async (url, options) => {
         aweme_list: [{ aweme_id: "saved-1" }],
         has_more: 0,
         cursor: 0,
-        total: 1,
+        data: { total_count: 1 },
       },
     };
   }
@@ -120,6 +120,7 @@ const bookmarkedPage = await fetchBookmarkedPage(page, { cursor: 0, count: 10 })
 assert.equal(bookmarkedPage.ok, true);
 assert.equal(bookmarkedPage.hasMore, false);
 assert.equal(bookmarkedPage.total, 1);
+assert.equal(bookmarkedPage.hasTotal, true);
 const bookmarkedRequest = requests.find((entry) => entry.url.includes("/aweme/listcollection/"));
 assert.equal(bookmarkedRequest.options.method, "POST");
 assert.equal(bookmarkedRequest.options.headers["content-type"], "application/x-www-form-urlencoded");

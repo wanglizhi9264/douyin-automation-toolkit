@@ -1,4 +1,4 @@
-import { normalizeAweme } from "./api.js";
+import { extractMediaParts, normalizeAweme } from "./api.js";
 
 export const LIKED_PAGE_SIZE = 18;
 export const LIKED_PAGE_MIN_INTERVAL_MS = 5000;
@@ -40,8 +40,8 @@ export function createLikedScanState(profile) {
 }
 
 export function isVideoAweme(aweme) {
-  if (Array.isArray(aweme?.images)) return false;
-  return Boolean(aweme?.aweme_id || aweme?.awemeId || aweme?.id);
+  const hasId = Boolean(aweme?.aweme_id || aweme?.awemeId || aweme?.id);
+  return hasId && extractMediaParts(aweme).length > 0;
 }
 
 export function advanceLikedScanState(state, page, videoCount) {
@@ -82,6 +82,14 @@ function mergeLikedItem(normalized, existing) {
     authorUid: normalized.authorUid || existing?.authorUid || "",
     authorName: normalized.authorName || existing?.authorName || "",
     url: normalized.url || existing?.url || "",
+    mediaType: normalized.mediaType || existing?.mediaType || "video",
+    mediaCount: normalized.mediaCount || existing?.mediaCount || 0,
+    mediaParts: normalized.mediaParts?.length
+      ? normalized.mediaParts
+      : (existing?.mediaParts || []),
+    imageUrls: normalized.imageUrls?.length
+      ? normalized.imageUrls
+      : (existing?.imageUrls || []),
     coverUrl: normalized.coverUrl || existing?.coverUrl || "",
     videoUrl: normalized.videoUrl || existing?.videoUrl || "",
     videoCandidates: normalized.videoCandidates?.length
@@ -91,6 +99,7 @@ function mergeLikedItem(normalized, existing) {
       ? normalized.videoFallbackCandidate
       : (existing?.videoFallbackCandidate || null),
     videoCandidatesFetchedAt: normalized.videoCandidatesFetchedAt || existing?.videoCandidatesFetchedAt || "",
+    downloadedMediaParts: existing?.downloadedMediaParts || {},
     downloadStatus: existing?.downloadStatus || "not_started",
     lastError: existing?.lastError || "",
     createdAt: existing?.createdAt || normalized.createdAt,
@@ -106,11 +115,13 @@ export function normalizeLikedPageItems(awemeList, existingItems, seenIds = new 
     -1,
   ) + 1;
   const items = [];
-  let skippedImages = 0;
+  let imageItems = 0;
+  let multiVideoItems = 0;
+  let skippedUnsupported = 0;
   let skippedDuplicates = 0;
   for (const aweme of awemeList || []) {
     if (!isVideoAweme(aweme)) {
-      if (Array.isArray(aweme?.images)) skippedImages += 1;
+      skippedUnsupported += 1;
       continue;
     }
     const awemeId = String(aweme.aweme_id || aweme.awemeId || aweme.id);
@@ -122,11 +133,16 @@ export function normalizeLikedPageItems(awemeList, existingItems, seenIds = new 
     const existing = existingById.get(awemeId);
     const normalized = normalizeAweme(aweme, existing?.index ?? nextIndex, "liked");
     if (!existing) nextIndex += 1;
+    if (["image", "multi_image", "mixed"].includes(normalized.mediaType)) imageItems += 1;
+    if (normalized.mediaType === "multi_video") multiVideoItems += 1;
     items.push(mergeLikedItem(normalized, existing));
   }
   return {
     items,
-    skippedImages,
+    skippedImages: 0,
+    imageItems,
+    multiVideoItems,
+    skippedUnsupported,
     skippedDuplicates,
   };
 }
