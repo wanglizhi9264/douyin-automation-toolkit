@@ -343,6 +343,7 @@ async function downloadSegmentedOne(page, rootDir, record, item, options, detail
     let mediaResult = null;
     let selectedCandidate = null;
     let selectedRank = 0;
+    const fallbackErrors = [];
 
     if (part.kind === "image") {
       mediaResult = await downloadMedia(page.context(), part.url, destination, {
@@ -352,7 +353,7 @@ async function downloadSegmentedOne(page, rootDir, record, item, options, detail
     } else {
       const candidates = mediaPartCandidates(part, options.preferBestQuality);
       if (!candidates.length) throw new Error("media part " + part.partId + " has no video candidate");
-      const candidateErrors = [];
+      const candidateErrors = fallbackErrors;
       for (const [index, candidate] of candidates.entries()) {
         printEvent(record, "Try media part candidate " + (index + 1) + " " + describeVideoCandidate(candidate), {
           type: "download_media_part_candidate_started",
@@ -399,6 +400,7 @@ async function downloadSegmentedOne(page, rootDir, record, item, options, detail
       contentType: mediaResult?.contentType || (part.kind === "image" ? "image/*" : "video/mp4"),
       candidateRank: selectedRank,
       quality: selectedCandidate,
+      fallbackErrors,
       width: Number(part.width || selectedCandidate?.width || 0),
       height: Number(part.height || selectedCandidate?.height || 0),
       updatedAt: new Date().toISOString(),
@@ -646,6 +648,7 @@ async function downloadOne(page, rootDir, record, item, options) {
     downloadVideoPath: relativePaths.video,
     downloadCoverPath: coverPath,
     downloadCandidateRank: selectedRank,
+    downloadQualityFallbackReason: candidateErrors.join(" | "),
     authorUid: detail.authorUid || item.authorUid || "",
     authorName: detail.authorName || item.authorName || "",
     createTime: detail.createTime || item.createTime || 0,

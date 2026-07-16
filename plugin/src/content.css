@@ -1,7 +1,7 @@
 #douyin-toolkit-sidebar {
   position: fixed;
   top: max(12px, env(safe-area-inset-top));
-  left: max(12px, env(safe-area-inset-left));
+  right: max(12px, env(safe-area-inset-right));
   width: clamp(320px, 28vw, 410px);
   height: calc(100vh - max(24px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom)));
   z-index: 2147483647;
@@ -9,14 +9,28 @@
   border-radius: 8px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.18);
   background: #fff;
+  transition: width 180ms ease, height 180ms ease, border-radius 180ms ease, box-shadow 180ms ease;
+  color-scheme: light;
+}
+
+#douyin-toolkit-sidebar[data-collapsed="true"] {
+  width: 46px;
+  height: 46px;
+  border-radius: 23px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 
 @media (max-width: 760px) {
   #douyin-toolkit-sidebar {
     top: 8px;
-    left: 8px;
+    right: 8px;
     width: min(390px, calc(100vw - 16px));
     height: calc(100vh - 16px);
+  }
+
+  #douyin-toolkit-sidebar[data-collapsed="true"] {
+    width: 46px;
+    height: 46px;
   }
 }
 
@@ -24,5 +38,10 @@
   #douyin-toolkit-sidebar {
     top: 8px;
     height: calc(100vh - 16px);
+  }
+
+  #douyin-toolkit-sidebar[data-collapsed="true"] {
+    width: 46px;
+    height: 46px;
   }
 }

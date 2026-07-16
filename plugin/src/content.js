@@ -3,6 +3,7 @@ const SIDEBAR_ID = "douyin-toolkit-sidebar";
 const INJECTED_ID = "douyin-toolkit-injected";
 
 let sidebarVisible = true;
+let sidebarCollapsed = false;
 
 let sidebarReady = false;
 const pendingSidebarMessages = [];
@@ -46,6 +47,7 @@ function ensureSidebar() {
   frame.id = SIDEBAR_ID;
   frame.src = chrome.runtime.getURL("src/sidebar/index.html");
   frame.setAttribute("title", "抖音收藏备份助手");
+  frame.setAttribute("data-collapsed", "false");
   document.documentElement.appendChild(frame);
   frame.addEventListener("load", () => {
     sidebarReady = true;
@@ -59,6 +61,19 @@ function removeSidebar() {
   sidebarVisible = false;
   sidebarReady = false;
   pendingSidebarMessages.length = 0;
+}
+
+function setSidebarCollapsed(collapsed) {
+  const frame = document.getElementById(SIDEBAR_ID);
+  if (!frame) return;
+  sidebarCollapsed = Boolean(collapsed);
+  frame.setAttribute("data-collapsed", String(sidebarCollapsed));
+  frame.setAttribute("title", sidebarCollapsed ? "展开抖音收藏备份助手" : "抖音收藏备份助手");
+  postToSidebar({
+    source: "douyin-toolkit-content",
+    type: "SIDEBAR_COLLAPSE_STATE",
+    payload: { collapsed: sidebarCollapsed },
+  });
 }
 
 function setSidebarVisible(visible) {
@@ -102,6 +117,10 @@ window.addEventListener("message", (event) => {
     return;
   }
   if (event.origin === EXTENSION_ORIGIN && event.data && event.data.source === "douyin-toolkit-sidebar") {
+    if (event.data.type === "SET_SIDEBAR_COLLAPSED") {
+      setSidebarCollapsed(event.data.payload?.collapsed);
+      return;
+    }
     if (event.data.type === "CLOSE_SIDEBAR") {
       removeSidebar();
       return;

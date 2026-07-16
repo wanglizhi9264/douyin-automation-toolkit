@@ -11,6 +11,7 @@ import {
 } from "../shared/api.js";
 import { chooseDownloadTarget, downloadUrl, downloadVerifiedMedia, getStoredDownloadTarget, readTextFile, writeFile } from "../shared/download.js";
 import { recoverDownloadedRecords } from "../shared/download-record.js";
+import { buildEnhancedDownloadReportHtml } from "../shared/report.js";
 import {
   advanceLikedScanState,
   createLikedScanState,
@@ -524,6 +525,8 @@ function buildDownloadRecord(items, state) {
       codec: item.downloadCodec || "",
       fps: item.downloadFps || 0,
       size: item.downloadSize || 0,
+      candidateRank: item.downloadCandidateRank || 0,
+      qualityFallbackReason: item.downloadQualityFallbackReason || "",
       videoPath: item.downloadVideoPath || "",
       coverPath: item.downloadCoverPath || "",
       url: item.url || "",
@@ -635,7 +638,7 @@ async function persistDownloadArtifacts(target, batchState, {
   });
   const performance = currentPerformanceSummary();
   await Promise.all([
-    writeFile(target, getDownloadReportPath(), buildDownloadReportHtml(record, target.label || "")),
+    writeFile(target, getDownloadReportPath(), buildEnhancedDownloadReportHtml(record, target.label || "", logs)),
     writeLocalDatabaseFiles(target, items, record),
     writeFile(target, "data/.appdata/download-log.json", JSON.stringify(logReport, null, 2) + "\n"),
     performance
@@ -687,6 +690,8 @@ function buildLocalDatabase(items, record) {
       bitrate: item.downloadBitrate || 0,
       quality: item.downloadQualityLabel || "",
       size: item.downloadSize || 0,
+      candidateRank: item.downloadCandidateRank || 0,
+      qualityFallbackReason: item.downloadQualityFallbackReason || "",
       url: item.url || "",
       updatedAt: item.updatedAt || "",
     };
@@ -3059,6 +3064,29 @@ $("restartCurrentDownloadBtn").addEventListener("click", async () => {
 
 $("closeBtn").addEventListener("click", () => {
   parent.postMessage({ source: "douyin-toolkit-sidebar", type: "CLOSE_SIDEBAR" }, "*");
+});
+
+let sidebarCollapsed = false;
+
+function renderSidebarCollapsed(collapsed) {
+  sidebarCollapsed = Boolean(collapsed);
+  document.body.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  const button = $("collapseBtn");
+  button.setAttribute("aria-label", sidebarCollapsed ? "展开面板" : "收起面板");
+  button.setAttribute("title", sidebarCollapsed ? "展开面板" : "收起面板");
+}
+
+$("collapseBtn").addEventListener("click", () => {
+  parent.postMessage({
+    source: "douyin-toolkit-sidebar",
+    type: "SET_SIDEBAR_COLLAPSED",
+    payload: { collapsed: !sidebarCollapsed },
+  }, "*");
+});
+
+window.addEventListener("message", (event) => {
+  if (event.data?.source !== "douyin-toolkit-content" || event.data?.type !== "SIDEBAR_COLLAPSE_STATE") return;
+  renderSidebarCollapsed(event.data.payload?.collapsed);
 });
 
 $("pickFolderBtn").addEventListener("click", () => {

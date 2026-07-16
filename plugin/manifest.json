@@ -55,6 +55,7 @@
         "src/sidebar/index.html",
         "src/sidebar/app.js",
         "src/sidebar/style.css",
+        "src/shared/report.js",
         "src/folder-picker/index.html",
         "src/folder-picker/app.js",
         "src/shared/db.js",

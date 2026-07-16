@@ -25,6 +25,8 @@ const recovered = recoverDownloadedRecords([
 ], [
   {
     awemeId: "100",
+    candidateRank: 2,
+    qualityFallbackReason: "#1 Failed to fetch",
     downloadStatus: "downloaded",
     resolution: "1440x2560",
     videoPath: video100,
@@ -56,6 +58,8 @@ assert.equal(patched.downloadStatus, "downloaded");
 assert.equal(patched.desc, "keep-local-description");
 assert.equal(patched.downloadQualityLabel, "1440x2560");
 assert.equal(patched.downloadVideoPath, video100);
+assert.equal(patched.downloadCandidateRank, 2);
+assert.match(patched.downloadQualityFallbackReason, /Failed to fetch/);
 assert.equal(patched.updatedAt, now);
 
 const reconstructed = recovered.find((item) => item.awemeId === "200");
