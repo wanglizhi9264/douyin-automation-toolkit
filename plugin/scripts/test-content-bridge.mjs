@@ -21,7 +21,10 @@ function makeElement(tagName) {
         forwarded.push({ data, origin });
       },
     } : null,
-    setAttribute() {},
+    attributes: new Map(),
+    setAttribute(name, value) {
+      this.attributes.set(name, String(value));
+    },
     addEventListener(type, listener) {
       listeners.set(type, listener);
     },
@@ -84,6 +87,27 @@ frame.dispatch("load");
 assert.equal(forwarded.length, 1, "queued page message should flush after iframe load");
 assert.equal(forwarded[0].origin, "chrome-extension://test-extension");
 assert.equal(forwarded[0].data.type, "BOOT");
+
+windowListeners.get("message")({
+  origin: "chrome-extension://test-extension",
+  data: {
+    source: "douyin-toolkit-sidebar",
+    type: "SET_SIDEBAR_COLLAPSED",
+    payload: { collapsed: true },
+  },
+});
+assert.equal(frame.attributes.get("data-collapsed"), "true", "sidebar should collapse into its compact handle");
+assert.equal(forwarded.at(-1).data.type, "SIDEBAR_COLLAPSE_STATE");
+
+windowListeners.get("message")({
+  origin: "chrome-extension://test-extension",
+  data: {
+    source: "douyin-toolkit-sidebar",
+    type: "SET_SIDEBAR_COLLAPSED",
+    payload: { collapsed: false },
+  },
+});
+assert.equal(frame.attributes.get("data-collapsed"), "false", "sidebar should expand from its compact handle");
 
 runtimeListeners[0]({ type: "TOGGLE_SIDEBAR" });
 assert.equal(frame.style.display, "none", "toolbar click should hide an open sidebar");

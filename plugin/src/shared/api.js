@@ -111,12 +111,138 @@ export function describeVideoCandidate(candidate) {
   return `${codec} ${resolution}${fps} ${bitrate} ${size}`;
 }
 
+function addressUrls(value) {
+  if (!value) return [];
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.filter((entry) => typeof entry === "string" && entry);
+  for (const key of ["download_url_list", "url_list", "urls"]) {
+    const urls = addressUrls(value[key]);
+    if (urls.length) return urls;
+  }
+  return [];
+}
+
+function pickImageUrl(image) {
+  for (const value of [
+    image?.download_url_list,
+    image?.download_url,
+    image?.origin_image,
+    image?.display_image,
+    image?.owner_watermark_image,
+    image?.image_url,
+    image?.url_list,
+    image?.url,
+  ]) {
+    const urls = addressUrls(value);
+    if (urls.length) return urls.at(-1);
+  }
+  return "";
+}
+
+function videoObject(entry) {
+  return entry?.video || entry?.video_info || entry?.videoInfo || entry || null;
+}
+
+function videoPartFrom(entry, partId, role, now) {
+  const video = videoObject(entry);
+  if (!video) return null;
+  const aweme = { video };
+  const candidates = pickVideoCandidates(aweme, { preferBestQuality: true }).slice(0, 5);
+  const fallbackCandidate = pickVideoUrl(aweme, { preferBestQuality: false });
+  if (!candidates.length && !fallbackCandidate?.url) return null;
+  return {
+    partId,
+    kind: "video",
+    role,
+    url: (fallbackCandidate || candidates[0])?.url || "",
+    candidates,
+    fallbackCandidate,
+    candidatesFetchedAt: now,
+  };
+}
+
+function explicitVideoEntries(aweme) {
+  const collections = [
+    aweme?.video_list,
+    aweme?.videos,
+    aweme?.video_segments,
+    aweme?.multi_video?.video_list,
+    aweme?.multi_video?.videos,
+    aweme?.multi_video?.segments,
+    aweme?.video?.video_list,
+    aweme?.video?.segments,
+  ];
+  return collections.find((entries) => Array.isArray(entries) && entries.length) || [];
+}
+
+export function extractMediaParts(aweme, { now = new Date().toISOString() } = {}) {
+  const parts = [];
+  const images = Array.isArray(aweme?.images) ? aweme.images : [];
+  for (const [index, image] of images.entries()) {
+    const url = pickImageUrl(image);
+    if (url) {
+      parts.push({
+        partId: `image-${index + 1}`,
+        kind: "image",
+        role: "carousel",
+        url,
+        width: Number(image?.width || image?.display_image?.width || 0),
+        height: Number(image?.height || image?.display_image?.height || 0),
+      });
+    }
+    const liveVideo = videoPartFrom(
+      image?.video || image?.video_info || image?.live_photo?.video,
+      `live-video-${index + 1}`,
+      "live_photo",
+      now,
+    );
+    if (liveVideo) parts.push(liveVideo);
+  }
+
+  const explicitVideos = explicitVideoEntries(aweme);
+  for (const [index, entry] of explicitVideos.entries()) {
+    const part = videoPartFrom(entry, `video-${index + 1}`, "segment", now);
+    if (part) parts.push(part);
+  }
+
+  if (!images.length && !explicitVideos.length) {
+    const part = videoPartFrom(aweme?.video, "video-1", "primary", now);
+    if (part) parts.push(part);
+  }
+
+  const seen = new Set();
+  return parts
+    .filter((part) => {
+      const key = part.kind + ":" + part.url;
+      if (!part.url || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((part, index) => ({ ...part, order: index + 1 }));
+}
+
+export function mediaTypeForParts(parts) {
+  const images = (parts || []).filter((part) => part.kind === "image").length;
+  const videos = (parts || []).filter((part) => part.kind === "video").length;
+  if (images && videos) return "mixed";
+  if (images > 1) return "multi_image";
+  if (images === 1) return "image";
+  if (videos > 1) return "multi_video";
+  if (videos === 1) return "video";
+  return "unsupported";
+}
+
 export function normalizeAweme(aweme, index = 0, source = "liked") {
   const awemeId = String(aweme?.aweme_id || aweme?.awemeId || aweme?.id || "");
   const now = new Date().toISOString();
-  const videoCandidates = pickVideoCandidates(aweme, { preferBestQuality: true }).slice(0, 5);
-  const videoFallbackCandidate = pickVideoUrl(aweme, { preferBestQuality: false });
+  const mediaParts = extractMediaParts(aweme, { now });
+  const mediaType = mediaTypeForParts(mediaParts);
+  const primaryVideo = mediaParts.find((part) => part.kind === "video") || null;
+  const firstImage = mediaParts.find((part) => part.kind === "image") || null;
+  const videoCandidates = primaryVideo?.candidates || [];
+  const videoFallbackCandidate = primaryVideo?.fallbackCandidate || null;
   const videoCandidate = videoFallbackCandidate || videoCandidates[0] || null;
+  const isImagePost = mediaParts.some((part) => part.kind === "image");
   return {
     awemeId,
     index,
@@ -126,13 +252,20 @@ export function normalizeAweme(aweme, index = 0, source = "liked") {
     desc: aweme?.desc || "",
     authorUid: aweme?.author?.uid || "",
     authorName: aweme?.author?.nickname || "",
-    url: awemeId ? `https://www.douyin.com/video/${awemeId}` : "",
-    coverUrl: aweme?.video?.cover?.url_list?.[0] || "",
+    url: awemeId
+      ? `https://www.douyin.com/${isImagePost ? "note" : "video"}/${awemeId}`
+      : "",
+    mediaType,
+    mediaCount: mediaParts.length,
+    mediaParts,
+    imageUrls: mediaParts.filter((part) => part.kind === "image").map((part) => part.url),
+    coverUrl: firstImage?.url || aweme?.video?.cover?.url_list?.[0] || "",
     videoUrl: videoCandidate?.url || "",
     videoCandidates,
     videoFallbackCandidate,
-    videoCandidatesFetchedAt: now,
+    videoCandidatesFetchedAt: primaryVideo?.candidatesFetchedAt || "",
     downloadStatus: "not_started",
+    downloadedMediaParts: {},
     lastError: "",
     createdAt: now,
     updatedAt: now,

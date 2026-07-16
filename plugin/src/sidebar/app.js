@@ -1,9 +1,17 @@
 import { sendPageRequest } from "../shared/events.js";
 import { addLog, getAll, getConfig, putItems, setConfig } from "../shared/db.js";
 import { DEFAULT_CONFIG, importProgress, loadConfig, saveConfig, summarize } from "../shared/state.js";
-import { describeVideoCandidate, normalizeAweme, pickVideoCandidates, pickVideoUrl } from "../shared/api.js";
+import {
+  describeVideoCandidate,
+  extractMediaParts,
+  mediaTypeForParts,
+  normalizeAweme,
+  pickVideoCandidates,
+  pickVideoUrl,
+} from "../shared/api.js";
 import { chooseDownloadTarget, downloadUrl, downloadVerifiedMedia, getStoredDownloadTarget, readTextFile, writeFile } from "../shared/download.js";
 import { recoverDownloadedRecords } from "../shared/download-record.js";
+import { buildEnhancedDownloadReportHtml } from "../shared/report.js";
 import {
   advanceLikedScanState,
   createLikedScanState,
@@ -68,6 +76,9 @@ let artifactCheckpoint = {
 };
 let scheduledRenderTimer = null;
 let remoteProfileCache = { result: null, loadedAt: 0 };
+let bookmarkedOverviewCache = { page: null, loadedAt: 0 };
+let bookmarkedOverviewInFlight = null;
+const BOOKMARKED_OVERVIEW_MAX_AGE_MS = 60 * 1000;
 let remoteProfileSummary = {
   status: "idle",
   likedTotal: null,
@@ -174,6 +185,15 @@ function profileUser(result) {
   return result?.json?.user || result?.json?.user_info || result?.json || null;
 }
 
+function optionalUserCount(user, keys) {
+  for (const key of keys) {
+    if (user?.[key] == null || user[key] === "") continue;
+    const value = Number(user[key]);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
+}
+
 async function requestSelfProfile({ maxAgeMs = 0, reason = "summary" } = {}) {
   const age = Date.now() - Number(remoteProfileCache.loadedAt || 0);
   if (remoteProfileCache.result?.ok && maxAgeMs > 0 && age >= 0 && age <= maxAgeMs) {
@@ -191,36 +211,92 @@ async function requestSelfProfile({ maxAgeMs = 0, reason = "summary" } = {}) {
   if (result?.ok && user) {
     remoteProfileSummary = {
       status: "loaded",
-      likedTotal: Number(user.favoriting_count ?? user.favoritingCount ?? 0) || 0,
-      bookmarkedTotal: Number(
-        user.collect_count ?? user.collection_count ?? user.aweme_collect_count ?? user.collectCount ?? 0,
-      ) || 0,
+      likedTotal: optionalUserCount(user, ["favoriting_count", "favoritingCount"]) ?? 0,
+      bookmarkedTotal: optionalUserCount(user, [
+        "collect_count", "collection_count", "aweme_collect_count", "collectCount",
+      ]),
       nickname: String(user.nickname || user.name || ""),
       durationMs,
       loadedAt: new Date().toISOString(),
       error: "",
     };
   } else {
+    const profileError = resultError(result);
     remoteProfileSummary = {
       ...remoteProfileSummary,
       status: "failed",
       durationMs,
       loadedAt: new Date().toISOString(),
-      error: resultError(result),
+      error: profileError,
     };
   }
   scheduleRender();
   return result;
+}
+async function requestBookmarkedOverview({
+  maxAgeMs = BOOKMARKED_OVERVIEW_MAX_AGE_MS,
+  reason = "summary",
+} = {}) {
+  const age = Date.now() - Number(bookmarkedOverviewCache.loadedAt || 0);
+  if (
+    bookmarkedOverviewCache.page?.ok
+    && age >= 0
+    && age <= maxAgeMs
+  ) {
+    recordStage("bookmarked_overview_cache", 0, { reason, ok: true });
+    return bookmarkedOverviewCache.page;
+  }
+  if (bookmarkedOverviewInFlight) {
+    recordStage("bookmarked_overview_join", 0, { reason, ok: true });
+    return bookmarkedOverviewInFlight;
+  }
+  bookmarkedOverviewInFlight = timedStage(
+    "bookmarked_overview_api",
+    () => sendPageRequest("FETCH_BOOKMARKED_PAGE", {
+      cursor: 0,
+      count: BOOKMARKED_PAGE_SIZE,
+    }, 60000),
+    { reason },
+  );
+  let page;
+  try {
+    page = await bookmarkedOverviewInFlight;
+  } finally {
+    bookmarkedOverviewInFlight = null;
+  }
+  if (!page?.ok || !Array.isArray(page.awemeList)) {
+    throw new Error(resultError(page));
+  }
+  lastBookmarkedPageRequestAt = Date.now();
+  bookmarkedOverviewCache = { page, loadedAt: Date.now() };
+  if (page.hasTotal || Number(page.total || 0) > 0) {
+    remoteProfileSummary = {
+      ...remoteProfileSummary,
+      bookmarkedTotal: Number(page.total || 0),
+      bookmarkedTotalSource: "listcollection",
+    };
+    scheduleRender();
+  }
+  return page;
+}
+
+function cachedBookmarkedFirstPage() {
+  const age = Date.now() - Number(bookmarkedOverviewCache.loadedAt || 0);
+  if (age < 0 || age > BOOKMARKED_OVERVIEW_MAX_AGE_MS) return null;
+  return bookmarkedOverviewCache.page?.ok ? bookmarkedOverviewCache.page : null;
 }
 
 async function refreshRemoteProfileSummary({ silent = false } = {}) {
   try {
     const result = await requestSelfProfile({ reason: "sidebar_summary" });
     if (!result?.ok) throw new Error(resultError(result));
+    if (remoteProfileSummary.bookmarkedTotal == null) {
+      await requestBookmarkedOverview({ reason: "sidebar_summary" });
+    }
     if (!silent) {
       logLine(
         "Official counts loaded: liked=" + remoteProfileSummary.likedTotal
-          + " bookmarked=" + remoteProfileSummary.bookmarkedTotal
+          + " bookmarked=" + (remoteProfileSummary.bookmarkedTotal ?? "unknown")
           + " in " + Math.round(remoteProfileSummary.durationMs) + "ms",
         {
           type: "remote_profile_summary_loaded",
@@ -408,6 +484,7 @@ function buildDownloadRecord(items, state) {
     .filter((item) => ["favorited", "already_favorited"].includes(item.status))
     .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0));
   return {
+    schemaVersion: 3,
     generatedAt: new Date().toISOString(),
     likedTotal: items.filter((item) => item.source === "liked" || item.source === "favorite_api").length,
     bookmarkedTotal: items.filter((item) => item.source === "bookmarked").length,
@@ -430,6 +507,13 @@ function buildDownloadRecord(items, state) {
       source: item.source || "liked",
       status: item.status,
       downloadStatus: item.downloadStatus || "not_started",
+      mediaType: item.mediaType || "video",
+      mediaCount: Number(item.mediaCount || item.mediaParts?.length || 1),
+      downloadedPartCount: Number(item.downloadedPartCount || 0),
+      mediaPaths: Array.isArray(item.downloadMediaPaths) ? item.downloadMediaPaths : [],
+      imagePaths: Array.isArray(item.downloadImagePaths) ? item.downloadImagePaths : [],
+      downloadedMediaParts: item.downloadedMediaParts || {},
+      mediaParts: Array.isArray(item.mediaParts) ? item.mediaParts : [],
       desc: item.desc || "",
       authorUid: item.authorUid || "",
       authorName: item.authorName || "",
@@ -441,6 +525,8 @@ function buildDownloadRecord(items, state) {
       codec: item.downloadCodec || "",
       fps: item.downloadFps || 0,
       size: item.downloadSize || 0,
+      candidateRank: item.downloadCandidateRank || 0,
+      qualityFallbackReason: item.downloadQualityFallbackReason || "",
       videoPath: item.downloadVideoPath || "",
       coverPath: item.downloadCoverPath || "",
       url: item.url || "",
@@ -552,7 +638,7 @@ async function persistDownloadArtifacts(target, batchState, {
   });
   const performance = currentPerformanceSummary();
   await Promise.all([
-    writeFile(target, getDownloadReportPath(), buildDownloadReportHtml(record, target.label || "")),
+    writeFile(target, getDownloadReportPath(), buildEnhancedDownloadReportHtml(record, target.label || "", logs)),
     writeLocalDatabaseFiles(target, items, record),
     writeFile(target, "data/.appdata/download-log.json", JSON.stringify(logReport, null, 2) + "\n"),
     performance
@@ -592,12 +678,20 @@ function buildLocalDatabase(items, record) {
       source: item.source || "liked",
       status: item.status || "",
       downloadStatus: item.downloadStatus || "not_started",
+      mediaType: item.mediaType || "video",
+      mediaCount: Number(item.mediaCount || item.mediaParts?.length || 1),
+      downloadedPartCount: Number(item.downloadedPartCount || 0),
+      mediaPaths: Array.isArray(item.downloadMediaPaths) ? item.downloadMediaPaths : [],
+      imagePaths: Array.isArray(item.downloadImagePaths) ? item.downloadImagePaths : [],
+      downloadedMediaParts: item.downloadedMediaParts || {},
       video: item.downloadVideoPath || "",
       cover: item.downloadCoverPath || "",
       width: item.downloadWidth || 0,
       bitrate: item.downloadBitrate || 0,
       quality: item.downloadQualityLabel || "",
       size: item.downloadSize || 0,
+      candidateRank: item.downloadCandidateRank || 0,
+      qualityFallbackReason: item.downloadQualityFallbackReason || "",
       url: item.url || "",
       updatedAt: item.updatedAt || "",
     };
@@ -874,8 +968,8 @@ async function renderContent() {
   const recordCursorItem = [...recordItems]
     .filter((item) => item.downloadStatus && item.downloadStatus !== "not_started")
     .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
-  $("likedSummaryCount").textContent = remoteProfileSummary.likedTotal ?? folderRecord?.likedTotal ?? 0;
-  $("bookmarkedSummaryCount").textContent = remoteProfileSummary.bookmarkedTotal ?? folderRecord?.bookmarkedTotal ?? 0;
+  $("likedSummaryCount").textContent = remoteProfileSummary.likedTotal ?? "-";
+  $("bookmarkedSummaryCount").textContent = remoteProfileSummary.bookmarkedTotal ?? "-";
   $("remoteSummaryMeta").textContent = remoteProfileSummary.status === "loaded"
     ? "Official counts in " + Math.round(remoteProfileSummary.durationMs) + "ms"
       + (remoteProfileSummary.nickname ? " | " + remoteProfileSummary.nickname : "")
@@ -994,6 +1088,16 @@ function patchItem(item, changes) {
     updatedAt: new Date().toISOString(),
   };
 }
+function createDownloadPausedError() {
+  const error = new Error("用户已请求暂停，分段下载停在安全点");
+  error.code = "DOWNLOAD_PAUSED";
+  return error;
+}
+
+function isDownloadPausedError(error) {
+  return error?.code === "DOWNLOAD_PAUSED";
+}
+
 
 async function saveItem(item) {
   await putItems([item]);
@@ -1418,15 +1522,21 @@ async function scanNextLikedPage(scanState) {
   ]);
   logLine(
     "\u68c0\u67e5\u559c\u6b22\u5217\u8868\uff1a\u7b2c " + nextState.page + " \u9875\uff0c\u672c\u9875 "
-      + page.awemeList.length + " \u6761\uff0c\u53ef\u4e0b\u8f7d\u89c6\u9891 " + normalized.items.length
+      + page.awemeList.length + " \u6761\uff0c\u53ef\u4e0b\u8f7d\u4f5c\u54c1 " + normalized.items.length
       + " \u6761\uff0c\u7d2f\u8ba1\u68c0\u67e5\u5230 " + nextState.checked
       + (nextState.expectedTotal ? "/" + nextState.expectedTotal : "")
-      + (normalized.skippedImages ? "\uff0c\u8df3\u8fc7\u56fe\u6587 " + normalized.skippedImages : ""),
+      + (normalized.imageItems ? "\uff0c\u56fe\u6587 " + normalized.imageItems : "")
+      + (normalized.multiVideoItems ? "\uff0c\u591a\u6bb5\u89c6\u9891 " + normalized.multiVideoItems : "")
+      + (normalized.skippedUnsupported ? "\uff0c\u8df3\u8fc7\u4e0d\u652f\u6301 " + normalized.skippedUnsupported : ""),
     {
       type: "liked_page_checked",
       page: nextState.page,
       pageItems: page.awemeList.length,
       videoItems: normalized.items.length,
+      mediaItems: normalized.items.length,
+      imageItems: normalized.imageItems,
+      multiVideoItems: normalized.multiVideoItems,
+      skippedUnsupported: normalized.skippedUnsupported,
       checked: nextState.checked,
       expectedTotal: nextState.expectedTotal,
       skippedImages: normalized.skippedImages,
@@ -1452,7 +1562,17 @@ async function startBookmarkedScan() {
   if (!profileResult?.ok) {
     throw new Error("\u6536\u85cf\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u65e0\u6cd5\u8bfb\u53d6\u5f53\u524d\u767b\u5f55\u7528\u6237\uff0c" + resultError(profileResult));
   }
-  const profile = parseBookmarkedProfile(profileResult);
+  const parsedProfile = parseBookmarkedProfile(profileResult);
+  const overview = cachedBookmarkedFirstPage()
+    || (bookmarkedOverviewInFlight
+      ? await requestBookmarkedOverview({ reason: "bookmarked_scan" })
+      : null);
+  const profile = {
+    ...parsedProfile,
+    expectedTotal: overview && (overview.hasTotal || Number(overview.total || 0) > 0)
+      ? Number(overview.total || 0)
+      : parsedProfile.expectedTotal,
+  };
   if (!profile.uid && !profile.secUid) {
     throw new Error("\u6536\u85cf\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u5f53\u524d\u7528\u6237\u7f3a\u5c11\u8d26\u53f7\u6807\u8bc6");
   }
@@ -1485,6 +1605,17 @@ async function waitForBookmarkedPageSlot() {
 }
 
 async function requestBookmarkedPageWithRetry(state) {
+  const preview = state.page === 0 && String(state.cursor ?? 0) === "0"
+    ? cachedBookmarkedFirstPage()
+    : null;
+  if (preview) {
+    recordStage("bookmarked_first_page_cache", 0, {
+      ok: true,
+      total: Number(preview.total || 0),
+      items: preview.awemeList.length,
+    });
+    return preview;
+  }
   let lastError = null;
   for (let attempt = 1; attempt <= BOOKMARKED_PAGE_MAX_RETRIES; attempt += 1) {
     try {
@@ -1534,6 +1665,14 @@ async function scanNextBookmarkedPage(scanState) {
   const normalized = normalizeBookmarkedPageItems(page.awemeList, existingItems, scanState.seenIds);
   if (normalized.items.length) await putItems(normalized.items);
   const nextState = advanceBookmarkedScanState(scanState, page, normalized.items.length);
+  if (page.hasTotal || Number(page.total || 0) > 0) {
+    remoteProfileSummary = {
+      ...remoteProfileSummary,
+      bookmarkedTotal: Number(page.total || 0),
+      bookmarkedTotalSource: "listcollection",
+    };
+    scheduleRender();
+  }
   await Promise.all([
     setConfig("bookmarkedSyncCursor", nextState.cursor),
     setConfig("bookmarkedSyncHasMore", nextState.hasMore),
@@ -1543,15 +1682,21 @@ async function scanNextBookmarkedPage(scanState) {
   ]);
   logLine(
     "\u68c0\u67e5\u6536\u85cf\u5217\u8868\uff1a\u7b2c " + nextState.page + " \u9875\uff0c\u672c\u9875 "
-      + page.awemeList.length + " \u6761\uff0c\u53ef\u4e0b\u8f7d\u89c6\u9891 " + normalized.items.length
+      + page.awemeList.length + " \u6761\uff0c\u53ef\u4e0b\u8f7d\u4f5c\u54c1 " + normalized.items.length
       + " \u6761\uff0c\u7d2f\u8ba1\u68c0\u67e5\u5230 " + nextState.checked
       + (nextState.expectedTotal ? "/" + nextState.expectedTotal : "")
-      + (normalized.skippedImages ? "\uff0c\u8df3\u8fc7\u56fe\u6587 " + normalized.skippedImages : ""),
+      + (normalized.imageItems ? "\uff0c\u56fe\u6587 " + normalized.imageItems : "")
+      + (normalized.multiVideoItems ? "\uff0c\u591a\u6bb5\u89c6\u9891 " + normalized.multiVideoItems : "")
+      + (normalized.skippedUnsupported ? "\uff0c\u8df3\u8fc7\u4e0d\u652f\u6301 " + normalized.skippedUnsupported : ""),
     {
       type: "bookmarked_page_checked",
       page: nextState.page,
       pageItems: page.awemeList.length,
       videoItems: normalized.items.length,
+      mediaItems: normalized.items.length,
+      imageItems: normalized.imageItems,
+      multiVideoItems: normalized.multiVideoItems,
+      skippedUnsupported: normalized.skippedUnsupported,
       checked: nextState.checked,
       expectedTotal: nextState.expectedTotal,
       skippedImages: normalized.skippedImages,
@@ -1568,6 +1713,355 @@ async function scanNextBookmarkedPage(scanState) {
   };
 }
 
+function shouldUseSegmentedDownload(item) {
+  const parts = Array.isArray(item?.mediaParts) ? item.mediaParts : [];
+  return parts.some((part) => part.kind === "image")
+    || parts.filter((part) => part.kind === "video").length > 1;
+}
+
+function imageExtension(url) {
+  try {
+    const extension = new URL(url).pathname.match(/\.([a-zA-Z0-9]{2,5})$/)?.[1]?.toLowerCase();
+    if (extension === "jpeg") return "jpg";
+    if (["jpg", "png", "webp", "gif", "avif", "heic"].includes(extension)) return extension;
+  } catch {}
+  return "jpg";
+}
+
+function mediaPartPath(sourceFolder, base, part, total) {
+  const width = Math.max(2, String(Math.max(1, total)).length);
+  const order = String(Number(part.order || 1)).padStart(width, "0");
+  if (part.kind === "image") {
+    return `${sourceFolder}/图片/${base}/${order}.${imageExtension(part.url)}`;
+  }
+  return `${sourceFolder}/视频/${base}/${order}.mp4`;
+}
+
+function mediaPartCandidates(part, preferBestQuality) {
+  const ranked = Array.isArray(part?.candidates) ? part.candidates.filter((entry) => entry?.url) : [];
+  const fallback = part?.fallbackCandidate?.url ? part.fallbackCandidate : null;
+  const ordered = preferBestQuality
+    ? [...ranked, fallback]
+    : [fallback || ranked[0]];
+  return ordered
+    .filter((entry) => entry?.url)
+    .filter((entry, index, list) => list.findIndex((other) => other.url === entry.url) === index)
+    .slice(0, preferBestQuality ? 4 : 1);
+}
+
+function mediaPartsNeedDetail(parts, config) {
+  if (!parts.length) return true;
+  if (!config.downloadPreferBestQuality) return false;
+  return parts
+    .filter((part) => part.kind === "video")
+    .some((part) => {
+      const age = Date.now() - Date.parse(part.candidatesFetchedAt || "");
+      return !Array.isArray(part.candidates)
+        || !part.candidates.length
+        || !Number.isFinite(age)
+        || age < 0
+        || age > CANDIDATE_CACHE_MAX_AGE_MS;
+    });
+}
+
+function mergeRefreshedMediaParts(existingParts, refreshedParts) {
+  if (!existingParts.length) return refreshedParts;
+  if (!refreshedParts.length) return existingParts;
+  const refreshedById = new Map(refreshedParts.map((part) => [part.partId, part]));
+  const merged = existingParts.map((part) => ({
+    ...part,
+    ...(refreshedById.get(part.partId) || {}),
+  }));
+  const known = new Set(merged.map((part) => part.partId));
+  for (const part of refreshedParts) {
+    if (!known.has(part.partId)) merged.push(part);
+  }
+  return merged.map((part, index) => ({ ...part, order: index + 1 }));
+}
+
+async function saveMediaPartProgress(item, rootHandle, mediaParts, progress) {
+  Object.assign(item, {
+    mediaType: mediaTypeForParts(mediaParts),
+    mediaCount: mediaParts.length,
+    mediaParts,
+    downloadedMediaParts: progress,
+    downloadedPartCount: mediaParts.filter((part) => progress[part.partId]?.status === "downloaded").length,
+    downloadStatus: "downloading",
+    lastError: "",
+  });
+  await saveItem(patchItem(item, {
+    mediaType: item.mediaType,
+    mediaCount: item.mediaCount,
+    mediaParts,
+    downloadedMediaParts: progress,
+    downloadedPartCount: item.downloadedPartCount,
+    downloadStatus: "downloading",
+    lastError: "",
+  }));
+  await persistDownloadArtifacts(rootHandle, downloadBatchState);
+}
+
+async function downloadVideoPart(item, rootHandle, part, relativePath, config) {
+  const candidates = mediaPartCandidates(part, Boolean(config.downloadPreferBestQuality));
+  if (!candidates.length) {
+    throw new Error(`第 ${part.order} 段视频没有可用候选`);
+  }
+  const errors = [];
+  for (const [index, candidate] of candidates.entries()) {
+    downloadBatchState.currentResolution = `第 ${part.order} 段 · ${describeVideoCandidate(candidate)}`;
+    updateDownloadBatchProgress();
+    const startedAt = timingNow();
+    try {
+      const result = await downloadVerifiedMedia(
+        rootHandle,
+        relativePath,
+        candidate.url,
+        { expected: "video" },
+      );
+      recordMediaTimings(result, {
+        kind: "video",
+        awemeId: item.awemeId,
+        candidateRank: index + 1,
+      });
+      logLine(
+        `分段视频下载成功：#${item.index} ${item.awemeId} 第 ${part.order} 段 ${describeVideoCandidate(candidate)}`,
+        {
+          type: "download_media_part_success",
+          awemeId: item.awemeId,
+          partId: part.partId,
+          kind: "video",
+          order: part.order,
+          candidateRank: index + 1,
+          path: relativePath,
+          size: result.size || 0,
+          quality: candidate,
+        },
+      );
+      return {
+        partId: part.partId,
+        kind: "video",
+        role: part.role || "segment",
+        order: part.order,
+        status: "downloaded",
+        path: relativePath,
+        size: Number(result.size || 0),
+        contentType: result.contentType || "video/mp4",
+        candidateRank: index + 1,
+        quality: candidate,
+        updatedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      errors.push(`#${index + 1} ${error?.message || String(error)}`);
+      recordStage("video_part_attempt_failed", timingNow() - startedAt, {
+        ok: false,
+        awemeId: item.awemeId,
+        partId: part.partId,
+        candidateRank: index + 1,
+        error: error?.message || String(error),
+      });
+      logLine(
+        `分段视频候选失败：#${item.index} ${item.awemeId} 第 ${part.order} 段候选 ${index + 1} ${error?.message || String(error)}`,
+        {
+          type: "download_media_part_candidate_failed",
+          awemeId: item.awemeId,
+          partId: part.partId,
+          order: part.order,
+          candidateRank: index + 1,
+          error: error?.message || String(error),
+        },
+      );
+    }
+  }
+  throw new Error(`第 ${part.order} 段视频下载失败：${errors.join(" | ")}`);
+}
+
+async function downloadImagePart(item, rootHandle, part, relativePath) {
+  const result = await downloadVerifiedMedia(
+    rootHandle,
+    relativePath,
+    part.url,
+    { expected: "image" },
+  );
+  recordMediaTimings(result, {
+    kind: "image",
+    awemeId: item.awemeId,
+  });
+  logLine(
+    `图文图片下载成功：#${item.index} ${item.awemeId} 第 ${part.order} 张`,
+    {
+      type: "download_media_part_success",
+      awemeId: item.awemeId,
+      partId: part.partId,
+      kind: "image",
+      order: part.order,
+      path: relativePath,
+      size: result.size || 0,
+    },
+  );
+  return {
+    partId: part.partId,
+    kind: "image",
+    role: part.role || "carousel",
+    order: part.order,
+    status: "downloaded",
+    path: relativePath,
+    size: Number(result.size || 0),
+    contentType: result.contentType || "image/*",
+    width: Number(part.width || 0),
+    height: Number(part.height || 0),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function downloadSegmentedMediaItem(item, rootHandle, config) {
+  if (rootHandle.kind !== "filesystem") {
+    throw new Error("图文和多段视频必须下载到已授权文件夹");
+  }
+  let detail = null;
+  let mediaParts = Array.isArray(item.mediaParts) ? item.mediaParts.filter((part) => part?.url) : [];
+  if (mediaPartsNeedDetail(mediaParts, config)) {
+    detail = await timedStage(
+      "detail_api",
+      () => sendPageRequest("FETCH_AWEME_DETAIL", { awemeId: item.awemeId }, 30000),
+      { awemeId: item.awemeId, index: item.index, reason: "segmented_media" },
+    );
+    if (!detail?.ok) throw new Error(`详情获取失败：${resultError(detail)}`);
+    mediaParts = mergeRefreshedMediaParts(
+      mediaParts,
+      extractMediaParts(detail.aweme),
+    );
+  }
+  if (!mediaParts.length) throw new Error("作品详情中没有可下载的图片或视频段");
+
+  item.mediaParts = mediaParts;
+  item.mediaType = mediaTypeForParts(mediaParts);
+  item.mediaCount = mediaParts.length;
+  const progress = { ...(item.downloadedMediaParts || {}) };
+  const sourceFolder = getSourceFolder(item.source);
+  const base = buildMediaBase(item);
+
+  for (const part of mediaParts) {
+    if (downloadPauseRequested) throw createDownloadPausedError();
+    if (progress[part.partId]?.status === "downloaded") {
+      logLine(`跳过已完成媒体段：#${item.index} ${item.awemeId} ${part.partId}`, {
+        type: "download_media_part_skipped",
+        awemeId: item.awemeId,
+        partId: part.partId,
+        path: progress[part.partId].path || "",
+      });
+      continue;
+    }
+    const relativePath = mediaPartPath(sourceFolder, base, part, mediaParts.length);
+    const record = part.kind === "image"
+      ? await downloadImagePart(item, rootHandle, part, relativePath)
+      : await downloadVideoPart(item, rootHandle, part, relativePath, config);
+    progress[part.partId] = record;
+    await saveMediaPartProgress(item, rootHandle, mediaParts, progress);
+  }
+
+  let coverPath = progress.cover?.path || "";
+  const hasContentImages = mediaParts.some((part) => part.kind === "image");
+  if (config.downloadCovers && item.coverUrl && !hasContentImages && !coverPath) {
+    coverPath = `${sourceFolder}/封面/${base}.jpg`;
+    const coverResult = await downloadVerifiedMedia(
+      rootHandle,
+      coverPath,
+      item.coverUrl,
+      { expected: "image" },
+    );
+    recordMediaTimings(coverResult, { kind: "cover", awemeId: item.awemeId });
+    progress.cover = {
+      partId: "cover",
+      kind: "image",
+      role: "cover",
+      order: mediaParts.length + 1,
+      status: "downloaded",
+      path: coverPath,
+      size: Number(coverResult.size || 0),
+      contentType: coverResult.contentType || "image/*",
+      updatedAt: new Date().toISOString(),
+    };
+    await saveMediaPartProgress(item, rootHandle, mediaParts, progress);
+  }
+
+  const completedParts = mediaParts.map((part) => progress[part.partId]).filter(Boolean);
+  if (completedParts.length !== mediaParts.length) {
+    throw new Error(`媒体分段未全部完成：${completedParts.length}/${mediaParts.length}`);
+  }
+  const videoRecords = completedParts.filter((part) => part.kind === "video");
+  const imageRecords = completedParts.filter((part) => part.kind === "image");
+  const mediaPaths = completedParts.map((part) => part.path);
+  const firstVideo = videoRecords[0] || null;
+  const firstQuality = firstVideo?.quality || null;
+  const qualityLabel = [
+    videoRecords.length ? `${videoRecords.length} 段视频` : "",
+    imageRecords.length ? `${imageRecords.length} 张图片` : "",
+  ].filter(Boolean).join(" + ");
+  const manifestPath = `data/.appdata/manifests/${base}.json`;
+  const manifest = {
+    awemeId: item.awemeId,
+    index: item.index,
+    source: item.source,
+    status: item.status,
+    mediaType: mediaTypeForParts(mediaParts),
+    mediaCount: mediaParts.length,
+    desc: detail?.desc || item.desc || "",
+    authorName: detail?.authorName || item.authorName || "",
+    authorUid: detail?.authorUid || item.authorUid || "",
+    createTime: detail?.createTime || item.createTime || 0,
+    url: item.url,
+    downloadedAt: new Date().toISOString(),
+    parts: completedParts,
+    files: {
+      media: mediaPaths,
+      videos: videoRecords.map((part) => part.path),
+      images: imageRecords.map((part) => part.path),
+      cover: coverPath || null,
+    },
+  };
+  await timedStage(
+    "manifest_write",
+    () => writeFile(rootHandle, manifestPath, JSON.stringify(manifest, null, 2) + "\n"),
+    { awemeId: item.awemeId, mediaType: manifest.mediaType },
+  );
+
+  Object.assign(item, {
+    mediaType: manifest.mediaType,
+    mediaCount: mediaParts.length,
+    mediaParts,
+    downloadedMediaParts: progress,
+    downloadedPartCount: mediaParts.length,
+    downloadMediaPaths: mediaPaths,
+    downloadImagePaths: imageRecords.map((part) => part.path),
+    downloadStatus: "downloaded",
+    downloadQualityLabel: qualityLabel,
+    downloadWidth: firstQuality?.width || 0,
+    downloadHeight: firstQuality?.height || 0,
+    downloadBitrate: firstQuality?.bitrate || 0,
+    downloadCodec: firstQuality?.codec || "",
+    downloadFps: firstQuality?.fps || 0,
+    downloadCandidateRank: firstVideo?.candidateRank || 0,
+    downloadSize: completedParts.reduce((sum, part) => sum + Number(part.size || 0), 0),
+    downloadVideoPath: firstVideo?.path || "",
+    downloadCoverPath: coverPath,
+    authorUid: detail?.authorUid || item.authorUid || "",
+    authorName: detail?.authorName || item.authorName || "",
+    createTime: detail?.createTime || item.createTime || 0,
+    lastError: "",
+  });
+  await saveItem(patchItem(item, {}));
+  logLine(`分段作品下载成功：#${item.index} ${item.awemeId} ${qualityLabel}`, {
+    type: "download_segmented_success",
+    awemeId: item.awemeId,
+    index: item.index,
+    mediaType: item.mediaType,
+    mediaCount: item.mediaCount,
+    videoCount: videoRecords.length,
+    imageCount: imageRecords.length,
+    paths: mediaPaths,
+  });
+}
+
 async function downloadOne(item, rootHandle, config) {
 
   downloadBatchState.inspected = Math.max(downloadBatchState.inspected, downloadBatchState.currentOrder || 0);
@@ -1582,6 +2076,10 @@ async function downloadOne(item, rootHandle, config) {
     source: item.source,
     targetKind: rootHandle.kind,
   });
+  if (shouldUseSegmentedDownload(item)) {
+    await downloadSegmentedMediaItem(item, rootHandle, config);
+    return;
+  }
   let videoUrl = item.videoUrl || "";
   let coverUrl = item.coverUrl || "";
   let detail = null;
@@ -1985,6 +2483,7 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
         consecutiveFailures = 0;
         downloadBatchState.completed = downloaded;
       } catch (error) {
+        if (isDownloadPausedError(error)) break;
         failed += 1;
         consecutiveFailures += 1;
         await saveItem(patchItem(item, {
@@ -2155,6 +2654,7 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
         consecutiveFailures = 0;
         downloadBatchState.completed = downloaded;
       } catch (error) {
+        if (isDownloadPausedError(error)) break;
         failed += 1;
         consecutiveFailures += 1;
         await saveItem(patchItem(item, {
@@ -2388,6 +2888,7 @@ async function runDownloadBatch(scope = "liked") {
         downloadBatchState.completed = downloaded;
         await persistDownloadArtifacts(rootHandle, downloadBatchState, { itemCompleted: true });
       } catch (error) {
+        if (isDownloadPausedError(error)) break;
         await saveItem(patchItem(item, { downloadStatus: "failed", lastError: `下载失败：${error.message}` }));
         logLine(`${scopeDef.label}下载失败：#${item.index} ${item.awemeId} ${error.message}`, {
           type: "download_failed",
@@ -2563,6 +3064,29 @@ $("restartCurrentDownloadBtn").addEventListener("click", async () => {
 
 $("closeBtn").addEventListener("click", () => {
   parent.postMessage({ source: "douyin-toolkit-sidebar", type: "CLOSE_SIDEBAR" }, "*");
+});
+
+let sidebarCollapsed = false;
+
+function renderSidebarCollapsed(collapsed) {
+  sidebarCollapsed = Boolean(collapsed);
+  document.body.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  const button = $("collapseBtn");
+  button.setAttribute("aria-label", sidebarCollapsed ? "展开面板" : "收起面板");
+  button.setAttribute("title", sidebarCollapsed ? "展开面板" : "收起面板");
+}
+
+$("collapseBtn").addEventListener("click", () => {
+  parent.postMessage({
+    source: "douyin-toolkit-sidebar",
+    type: "SET_SIDEBAR_COLLAPSED",
+    payload: { collapsed: !sidebarCollapsed },
+  }, "*");
+});
+
+window.addEventListener("message", (event) => {
+  if (event.data?.source !== "douyin-toolkit-content" || event.data?.type !== "SIDEBAR_COLLAPSE_STATE") return;
+  renderSidebarCollapsed(event.data.payload?.collapsed);
 });
 
 $("pickFolderBtn").addEventListener("click", () => {

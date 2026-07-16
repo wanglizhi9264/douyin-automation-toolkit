@@ -16,15 +16,20 @@ export function recoverDownloadedRecords(existingItems, recordItems, {
   ) + 1;
   const recovered = [];
   for (const recordItem of recordItems || []) {
-    if (!recordItem?.awemeId || recordItem.downloadStatus !== "downloaded") continue;
+    const downloadedMediaParts = recordItem?.downloadedMediaParts || {};
+    const downloadedPartCount = Object.values(downloadedMediaParts)
+      .filter((part) => part?.status === "downloaded").length;
+    const fullyDownloaded = recordItem?.downloadStatus === "downloaded";
+    if (!recordItem?.awemeId || (!fullyDownloaded && !downloadedPartCount)) continue;
     const awemeId = String(recordItem.awemeId);
     const source = recordItem.source || defaultSource;
     const existing = existingById.get(recordKey(source, awemeId));
     if (existing?.downloadStatus === "downloaded") continue;
+    const restoredStatus = fullyDownloaded ? "downloaded" : "not_started";
     if (existing) {
       recovered.push({
         ...existing,
-        downloadStatus: "downloaded",
+        downloadStatus: restoredStatus,
         lastError: "",
         downloadQualityLabel: recordItem.resolution || existing.downloadQualityLabel || "",
         downloadWidth: recordItem.width || existing.downloadWidth || 0,
@@ -33,9 +38,21 @@ export function recoverDownloadedRecords(existingItems, recordItems, {
         downloadCodec: recordItem.codec || existing.downloadCodec || "",
         downloadFps: recordItem.fps || existing.downloadFps || 0,
         downloadSize: recordItem.size || existing.downloadSize || 0,
+        downloadCandidateRank: recordItem.candidateRank || recordItem.downloadCandidateRank || existing.downloadCandidateRank || 0,
+        downloadQualityFallbackReason: recordItem.qualityFallbackReason || recordItem.downloadQualityFallbackReason || existing.downloadQualityFallbackReason || "",
         downloadVideoPath: recordItem.videoPath || existing.downloadVideoPath || "",
         downloadCoverPath: recordItem.coverPath || existing.downloadCoverPath || "",
         updatedAt: now,
+        mediaType: recordItem.mediaType || existing.mediaType || "video",
+        mediaCount: recordItem.mediaCount || existing.mediaCount || 0,
+        mediaParts: recordItem.mediaParts?.length ? recordItem.mediaParts : (existing.mediaParts || []),
+        downloadedMediaParts: {
+          ...(existing.downloadedMediaParts || {}),
+          ...downloadedMediaParts,
+        },
+        downloadedPartCount: Math.max(downloadedPartCount, existing.downloadedPartCount || 0),
+        downloadMediaPaths: recordItem.mediaPaths || existing.downloadMediaPaths || [],
+        downloadImagePaths: recordItem.imagePaths || existing.downloadImagePaths || [],
       });
       continue;
     }
@@ -52,10 +69,12 @@ export function recoverDownloadedRecords(existingItems, recordItems, {
       authorUid: recordItem.authorUid || "",
       authorName: recordItem.authorName || "",
       createTime: recordItem.createTime || 0,
-      url: recordItem.url || ("https://www.douyin.com/video/" + awemeId),
+      url: recordItem.url || ("https://www.douyin.com/"
+        + (["image", "multi_image", "mixed"].includes(recordItem.mediaType) ? "note/" : "video/")
+        + awemeId),
       coverUrl: "",
       videoUrl: "",
-      downloadStatus: "downloaded",
+      downloadStatus: restoredStatus,
       downloadQualityLabel: recordItem.resolution || "",
       downloadWidth: recordItem.width || 0,
       downloadHeight: recordItem.height || 0,
@@ -66,7 +85,16 @@ export function recoverDownloadedRecords(existingItems, recordItems, {
       downloadVideoPath: recordItem.videoPath || "",
       downloadCoverPath: recordItem.coverPath || "",
       lastError: "",
+      downloadCandidateRank: recordItem.candidateRank || recordItem.downloadCandidateRank || 0,
+      downloadQualityFallbackReason: recordItem.qualityFallbackReason || recordItem.downloadQualityFallbackReason || "",
       createdAt: recordItem.updatedAt || now,
+      mediaType: recordItem.mediaType || "video",
+      mediaCount: recordItem.mediaCount || 0,
+      mediaParts: recordItem.mediaParts || [],
+      downloadedMediaParts,
+      downloadedPartCount,
+      downloadMediaPaths: recordItem.mediaPaths || [],
+      downloadImagePaths: recordItem.imagePaths || [],
       updatedAt: now,
     });
   }

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export const DOWNLOAD_RECORD_SCHEMA_VERSION = 2;
+export const DOWNLOAD_RECORD_SCHEMA_VERSION = 3;
 
 export function normalizeScope(source) {
   if (source === "favorite_api") return "liked";
@@ -231,6 +231,50 @@ export function applyListReconciliation(record, scope, reconciliation) {
     [normalizedScope]: reconciliation.snapshot,
   };
   return record;
+}
+
+function mediaSourceFolder(scope) {
+  return normalizeScope(scope) === "bookmarked" ? "收藏" : "点赞";
+}
+
+export function mediaPartExtension(url) {
+  try {
+    const extension = new URL(url).pathname.match(/\.([a-zA-Z0-9]{2,5})$/)?.[1]?.toLowerCase();
+    if (extension === "jpeg") return "jpg";
+    if (["jpg", "png", "webp", "gif", "avif", "heic"].includes(extension)) return extension;
+  } catch {}
+  return "jpg";
+}
+
+export function mediaPartRelativePath(scope, awemeId, part, total = 1) {
+  const sourceFolder = mediaSourceFolder(scope);
+  const base = String(awemeId);
+  const width = Math.max(2, String(Math.max(1, total)).length);
+  const order = String(Number(part?.order || 1)).padStart(width, "0");
+  if (part?.kind === "image") {
+    return path.posix.join("data", sourceFolder, "图片", base, order + "." + mediaPartExtension(part.url));
+  }
+  return path.posix.join("data", sourceFolder, "视频", base, order + ".mp4");
+}
+
+export function mediaPartCandidates(part, preferBestQuality = true) {
+  const ranked = Array.isArray(part?.candidates)
+    ? part.candidates.filter((candidate) => candidate?.url)
+    : [];
+  const fallback = part?.fallbackCandidate?.url ? part.fallbackCandidate : null;
+  const candidates = preferBestQuality
+    ? [...ranked, fallback]
+    : [fallback || ranked[0]];
+  return candidates
+    .filter((candidate) => candidate?.url)
+    .filter((candidate, index, list) => (
+      list.findIndex((other) => other.url === candidate.url) === index
+    ))
+    .slice(0, preferBestQuality ? 4 : 1);
+}
+
+export function segmentedManifestRelativePath(awemeId) {
+  return path.posix.join("data", ".appdata", "manifests", String(awemeId) + ".json");
 }
 
 export function mediaRelativePaths(scope, awemeId) {

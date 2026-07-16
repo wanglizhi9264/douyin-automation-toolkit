@@ -1,4 +1,4 @@
-import { normalizeAweme } from "./api.js";
+import { extractMediaParts, normalizeAweme } from "./api.js";
 
 export const BOOKMARKED_PAGE_SIZE = 10;
 export const BOOKMARKED_PAGE_MIN_INTERVAL_MS = 3000;
@@ -69,8 +69,8 @@ export function advanceBookmarkedScanState(state, page, videoCount) {
 }
 
 export function isBookmarkedVideoAweme(aweme) {
-  if (Array.isArray(aweme?.images)) return false;
-  return Boolean(aweme?.aweme_id || aweme?.awemeId || aweme?.id);
+  const hasId = Boolean(aweme?.aweme_id || aweme?.awemeId || aweme?.id);
+  return hasId && extractMediaParts(aweme).length > 0;
 }
 
 function mergeBookmarkedItem(normalized, existing) {
@@ -85,6 +85,14 @@ function mergeBookmarkedItem(normalized, existing) {
     authorUid: normalized.authorUid || existing?.authorUid || "",
     authorName: normalized.authorName || existing?.authorName || "",
     url: normalized.url || existing?.url || "",
+    mediaType: normalized.mediaType || existing?.mediaType || "video",
+    mediaCount: normalized.mediaCount || existing?.mediaCount || 0,
+    mediaParts: normalized.mediaParts?.length
+      ? normalized.mediaParts
+      : (existing?.mediaParts || []),
+    imageUrls: normalized.imageUrls?.length
+      ? normalized.imageUrls
+      : (existing?.imageUrls || []),
     coverUrl: normalized.coverUrl || existing?.coverUrl || "",
     videoUrl: normalized.videoUrl || existing?.videoUrl || "",
     videoCandidates: normalized.videoCandidates?.length
@@ -94,6 +102,7 @@ function mergeBookmarkedItem(normalized, existing) {
       ? normalized.videoFallbackCandidate
       : (existing?.videoFallbackCandidate || null),
     videoCandidatesFetchedAt: normalized.videoCandidatesFetchedAt || existing?.videoCandidatesFetchedAt || "",
+    downloadedMediaParts: existing?.downloadedMediaParts || {},
     downloadStatus: existing?.downloadStatus || "not_started",
     lastError: existing?.lastError || "",
     createdAt: existing?.createdAt || normalized.createdAt,
@@ -109,11 +118,13 @@ export function normalizeBookmarkedPageItems(awemeList, existingItems, seenIds =
     -1,
   ) + 1;
   const items = [];
-  let skippedImages = 0;
+  let imageItems = 0;
+  let multiVideoItems = 0;
+  let skippedUnsupported = 0;
   let skippedDuplicates = 0;
   for (const aweme of awemeList || []) {
     if (!isBookmarkedVideoAweme(aweme)) {
-      if (Array.isArray(aweme?.images)) skippedImages += 1;
+      skippedUnsupported += 1;
       continue;
     }
     const awemeId = String(aweme.aweme_id || aweme.awemeId || aweme.id);
@@ -125,11 +136,16 @@ export function normalizeBookmarkedPageItems(awemeList, existingItems, seenIds =
     const existing = existingById.get(awemeId);
     const normalized = normalizeAweme(aweme, existing?.index ?? nextIndex, "bookmarked");
     if (!existing) nextIndex += 1;
+    if (["image", "multi_image", "mixed"].includes(normalized.mediaType)) imageItems += 1;
+    if (normalized.mediaType === "multi_video") multiVideoItems += 1;
     items.push(mergeBookmarkedItem(normalized, existing));
   }
   return {
     items,
-    skippedImages,
+    skippedImages: 0,
+    imageItems,
+    multiVideoItems,
+    skippedUnsupported,
     skippedDuplicates,
   };
 }

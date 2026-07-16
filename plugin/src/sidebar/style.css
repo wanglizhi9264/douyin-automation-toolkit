@@ -76,6 +76,58 @@ h1 {
   flex: 0 0 auto;
 }
 
+.window-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.collapse-button {
+  font-size: 25px;
+  transform: rotate(180deg);
+}
+
+body.sidebar-collapsed {
+  min-height: 46px;
+  overflow: hidden;
+  background: transparent;
+}
+
+body.sidebar-collapsed .app {
+  display: block;
+  min-height: 46px;
+}
+
+body.sidebar-collapsed .header {
+  width: 46px;
+  height: 46px;
+  padding: 7px;
+  border: 0;
+  background: transparent;
+}
+
+body.sidebar-collapsed .title-stack,
+body.sidebar-collapsed #pageMeta,
+body.sidebar-collapsed .content,
+body.sidebar-collapsed #closeBtn {
+  display: none;
+}
+
+body.sidebar-collapsed .title-row,
+body.sidebar-collapsed .window-actions {
+  display: block;
+}
+
+body.sidebar-collapsed #collapseBtn {
+  width: 32px;
+  height: 32px;
+  color: #fff;
+  border-color: var(--blue);
+  background: var(--blue);
+  transform: none;
+}
+
 .close-button:hover {
   color: var(--text);
   border-color: #b8b8bf;

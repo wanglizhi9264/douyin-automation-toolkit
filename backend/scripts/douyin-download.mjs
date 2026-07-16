@@ -7,6 +7,8 @@ import { chromium } from "playwright";
 
 import {
   describeVideoCandidate,
+  extractMediaParts,
+  mediaTypeForParts,
   pickVideoCandidates,
   pickVideoUrl,
 } from "../../plugin/src/shared/api.js";
@@ -36,6 +38,9 @@ import {
   inferPreviousSnapshot,
   loadDownloadRecord,
   mediaRelativePaths,
+  mediaPartCandidates,
+  mediaPartRelativePath,
+  segmentedManifestRelativePath,
   normalizeScope,
   reconcileListSnapshot,
   saveDownloadRecord,
@@ -260,6 +265,12 @@ async function requestScanPage(page, scope, scanState, record, rootDir, requestC
     ? BOOKMARKED_PAGE_MAX_RETRIES
     : LIKED_PAGE_MAX_RETRIES;
   const retryDelay = isBookmarked ? bookmarkedRetryDelayMs : likedRetryDelayMs;
+  if (isBookmarked && String(scanState.cursor ?? 0) === "0" && requestClock.firstBookmarkedPage) {
+    const cached = requestClock.firstBookmarkedPage;
+    requestClock.firstBookmarkedPage = null;
+    return cached;
+  }
+
   await waitForPageSlot(requestClock.lastAt, minimumIntervalMs);
   requestClock.lastAt = Date.now();
 
@@ -292,6 +303,218 @@ async function requestScanPage(page, scope, scanState, record, rootDir, requestC
   );
 }
 
+function shouldDownloadAsSegments(mediaParts) {
+  const parts = Array.isArray(mediaParts) ? mediaParts : [];
+  return parts.some((part) => part.kind === "image")
+    || parts.filter((part) => part.kind === "video").length > 1;
+}
+
+async function downloadSegmentedOne(page, rootDir, record, item, options, detail, mediaParts) {
+  const progress = { ...(item.downloadedMediaParts || {}) };
+  const mediaType = mediaTypeForParts(mediaParts);
+  Object.assign(item, {
+    mediaType,
+    mediaCount: mediaParts.length,
+    mediaParts,
+    downloadedMediaParts: progress,
+    downloadedPartCount: mediaParts.filter((part) => progress[part.partId]?.status === "downloaded").length,
+    downloadStatus: "downloading",
+    lastError: "",
+    updatedAt: new Date().toISOString(),
+  });
+  persist(rootDir, record);
+
+  for (const part of mediaParts) {
+    const completed = progress[part.partId];
+    if (completed?.status === "downloaded") {
+      printEvent(record, "Skip completed media part " + item.awemeId + " " + part.partId, {
+        type: "download_media_part_skipped",
+        scope: item.source,
+        awemeId: item.awemeId,
+        partId: part.partId,
+        path: completed.path || "",
+      });
+      persist(rootDir, record);
+      continue;
+    }
+
+    const relativePath = mediaPartRelativePath(item.source, item.awemeId, part, mediaParts.length);
+    const destination = absoluteMediaPath(rootDir, relativePath);
+    let mediaResult = null;
+    let selectedCandidate = null;
+    let selectedRank = 0;
+    const fallbackErrors = [];
+
+    if (part.kind === "image") {
+      mediaResult = await downloadMedia(page.context(), part.url, destination, {
+        expected: "image",
+        timeoutMs: options.mediaTimeoutMs,
+      });
+    } else {
+      const candidates = mediaPartCandidates(part, options.preferBestQuality);
+      if (!candidates.length) throw new Error("media part " + part.partId + " has no video candidate");
+      const candidateErrors = fallbackErrors;
+      for (const [index, candidate] of candidates.entries()) {
+        printEvent(record, "Try media part candidate " + (index + 1) + " " + describeVideoCandidate(candidate), {
+          type: "download_media_part_candidate_started",
+          scope: item.source,
+          awemeId: item.awemeId,
+          partId: part.partId,
+          candidateRank: index + 1,
+          quality: candidate,
+        });
+        try {
+          mediaResult = await downloadMedia(page.context(), candidate.url, destination, {
+            expected: "video",
+            timeoutMs: options.mediaTimeoutMs,
+          });
+          selectedCandidate = candidate;
+          selectedRank = index + 1;
+          break;
+        } catch (error) {
+          candidateErrors.push("#" + (index + 1) + " " + error.message);
+          printEvent(record, "Media part candidate failed " + (index + 1) + " " + error.message, {
+            type: "download_media_part_candidate_failed",
+            scope: item.source,
+            awemeId: item.awemeId,
+            partId: part.partId,
+            candidateRank: index + 1,
+            error: error.message,
+          });
+          persist(rootDir, record);
+        }
+      }
+      if (!selectedCandidate) {
+        throw new Error("all candidates failed for " + part.partId + ": " + candidateErrors.join(" | "));
+      }
+    }
+
+    progress[part.partId] = {
+      partId: part.partId,
+      kind: part.kind,
+      role: part.role || "",
+      order: part.order,
+      status: "downloaded",
+      path: relativePath,
+      size: Number(mediaResult?.contentLength || selectedCandidate?.size || 0),
+      contentType: mediaResult?.contentType || (part.kind === "image" ? "image/*" : "video/mp4"),
+      candidateRank: selectedRank,
+      quality: selectedCandidate,
+      fallbackErrors,
+      width: Number(part.width || selectedCandidate?.width || 0),
+      height: Number(part.height || selectedCandidate?.height || 0),
+      updatedAt: new Date().toISOString(),
+    };
+    Object.assign(item, {
+      downloadedMediaParts: progress,
+      downloadedPartCount: mediaParts.filter((entry) => progress[entry.partId]?.status === "downloaded").length,
+      downloadStatus: "downloading",
+      updatedAt: new Date().toISOString(),
+    });
+    printEvent(record, "Media part downloaded " + item.awemeId + " " + part.partId, {
+      type: "download_media_part_success",
+      scope: item.source,
+      awemeId: item.awemeId,
+      partId: part.partId,
+      kind: part.kind,
+      order: part.order,
+      path: relativePath,
+      size: progress[part.partId].size,
+    });
+    persist(rootDir, record);
+  }
+
+  const completedParts = mediaParts.map((part) => progress[part.partId]).filter(Boolean);
+  if (completedParts.length !== mediaParts.length) {
+    throw new Error("media parts incomplete: " + completedParts.length + "/" + mediaParts.length);
+  }
+  const videoRecords = completedParts.filter((part) => part.kind === "video");
+  const imageRecords = completedParts.filter((part) => part.kind === "image");
+  const mediaPaths = completedParts.map((part) => part.path);
+  let coverPath = item.downloadCoverPath || item.coverPath || "";
+  if (options.covers && detail.coverUrl && !imageRecords.length && !coverPath) {
+    const relativePaths = mediaRelativePaths(item.source, item.awemeId);
+    await downloadMedia(page.context(), detail.coverUrl, absoluteMediaPath(rootDir, relativePaths.cover), {
+      expected: "image",
+      timeoutMs: options.mediaTimeoutMs,
+    });
+    coverPath = relativePaths.cover;
+  }
+
+  const firstVideo = videoRecords[0] || null;
+  const firstQuality = firstVideo?.quality || null;
+  const qualityLabel = [
+    videoRecords.length ? videoRecords.length + " video parts" : "",
+    imageRecords.length ? imageRecords.length + " images" : "",
+  ].filter(Boolean).join(" + ");
+  const manifest = {
+    awemeId: item.awemeId,
+    index: item.index,
+    source: normalizeScope(item.source),
+    status: item.status || "",
+    mediaType,
+    mediaCount: mediaParts.length,
+    desc: detail.desc || item.desc || "",
+    authorUid: detail.authorUid || item.authorUid || "",
+    authorName: detail.authorName || item.authorName || "",
+    createTime: detail.createTime || item.createTime || 0,
+    url: item.url || ("https://www.douyin.com/" + (imageRecords.length ? "note/" : "video/") + item.awemeId),
+    downloadedAt: new Date().toISOString(),
+    parts: completedParts,
+    files: {
+      media: mediaPaths,
+      videos: videoRecords.map((part) => part.path),
+      images: imageRecords.map((part) => part.path),
+      cover: coverPath || null,
+    },
+  };
+  writeJsonAtomic(absoluteMediaPath(rootDir, segmentedManifestRelativePath(item.awemeId)), manifest);
+
+  Object.assign(item, {
+    status: item.status || "already_favorited",
+    mediaType,
+    mediaCount: mediaParts.length,
+    mediaParts,
+    downloadedMediaParts: progress,
+    downloadedPartCount: mediaParts.length,
+    downloadStatus: "downloaded",
+    resolution: qualityLabel,
+    downloadQualityLabel: qualityLabel,
+    width: firstQuality?.width || 0,
+    height: firstQuality?.height || 0,
+    bitrate: firstQuality?.bitrate || 0,
+    codec: firstQuality?.codec || "",
+    fps: firstQuality?.fps || 0,
+    size: completedParts.reduce((sum, part) => sum + Number(part.size || 0), 0),
+    mediaPaths,
+    imagePaths: imageRecords.map((part) => part.path),
+    downloadMediaPaths: mediaPaths,
+    downloadImagePaths: imageRecords.map((part) => part.path),
+    videoPath: firstVideo?.path || "",
+    coverPath,
+    downloadVideoPath: firstVideo?.path || "",
+    downloadCoverPath: coverPath,
+    downloadCandidateRank: firstVideo?.candidateRank || 0,
+    authorUid: detail.authorUid || item.authorUid || "",
+    authorName: detail.authorName || item.authorName || "",
+    createTime: detail.createTime || item.createTime || 0,
+    desc: detail.desc || item.desc || "",
+    lastError: "",
+    updatedAt: new Date().toISOString(),
+  });
+  printEvent(record, "Segmented download success " + item.awemeId + " " + qualityLabel, {
+    type: "download_segmented_success",
+    scope: item.source,
+    awemeId: item.awemeId,
+    mediaType,
+    mediaCount: mediaParts.length,
+    videoCount: videoRecords.length,
+    imageCount: imageRecords.length,
+    paths: mediaPaths,
+  });
+  persist(rootDir, record);
+}
+
 async function downloadOne(page, rootDir, record, item, options) {
   item.downloadStatus = "downloading";
   item.lastError = "";
@@ -319,6 +542,13 @@ async function downloadOne(page, rootDir, record, item, options) {
       },
     },
   );
+
+  const mediaParts = extractMediaParts(detail.aweme);
+  if (!mediaParts.length) throw new Error("detail has no downloadable media");
+  if (shouldDownloadAsSegments(mediaParts)) {
+    await downloadSegmentedOne(page, rootDir, record, item, options, detail, mediaParts);
+    return;
+  }
 
   const rankedCandidates = pickVideoCandidates(detail.aweme, {
     preferBestQuality: options.preferBestQuality,
@@ -418,6 +648,7 @@ async function downloadOne(page, rootDir, record, item, options) {
     downloadVideoPath: relativePaths.video,
     downloadCoverPath: coverPath,
     downloadCandidateRank: selectedRank,
+    downloadQualityFallbackReason: candidateErrors.join(" | "),
     authorUid: detail.authorUid || item.authorUid || "",
     authorName: detail.authorName || item.authorName || "",
     createTime: detail.createTime || item.createTime || 0,
@@ -496,7 +727,39 @@ export async function runDownload(page, rootDir, record, scope, options) {
   let attempted = 0;
   let consecutiveFailures = 0;
   const requestClock = { lastAt: 0 };
+  if (scope === "bookmarked") {
+    const overview = await requestWithRetry(
+      () => fetchBookmarkedPage(page, { cursor: 0, count: BOOKMARKED_PAGE_SIZE }),
+      {
+        retries: BOOKMARKED_PAGE_MAX_RETRIES,
+        delayForAttempt: bookmarkedRetryDelayMs,
+        onRetry: ({ attempt, delayMs, error }) => {
+          printEvent(record, "Bookmarked overview retry " + attempt, {
+            type: "bookmarked_overview_retry",
+            delayMs,
+            error: error.message,
+          });
+          persist(rootDir, record);
+        },
+      },
+    );
+    requestClock.lastAt = Date.now();
+    requestClock.firstBookmarkedPage = overview;
+    const overviewTotal = Number(overview.total || 0);
+    if (overviewTotal > 0) {
+      profile.expectedTotal = Math.max(Number(profile.expectedTotal || 0), overviewTotal);
+      scanState = { ...scanState, expectedTotal: profile.expectedTotal };
+      record.current.total = profile.expectedTotal;
+    }
+    printEvent(record, "Bookmarked overview loaded: total=" + profile.expectedTotal, {
+      type: "bookmarked_overview_loaded",
+      expectedTotal: profile.expectedTotal,
+      responseTotal: overviewTotal,
+      firstPageItems: overview.awemeList.length,
+    });
+    persist(rootDir, record);
 
+  }
   while (!scanState.finished && !stopRequested) {
     if (scanState.page >= options.maxPages) {
       stopRequested = true;
@@ -522,17 +785,21 @@ export async function runDownload(page, rootDir, record, scope, options) {
     };
     printEvent(record, "Checked " + scope + " page " + scanState.page
       + ": raw=" + pageResult.awemeList.length
-      + " videos=" + pageItems.length
+      + " works=" + pageItems.length
       + " total=" + scanState.checked, {
       type: scope + "_page_checked",
       page: scanState.page,
       rawItems: pageResult.awemeList.length,
       videoItems: pageItems.length,
+      mediaItems: pageItems.length,
       checked: scanState.checked,
       cursor: scanCursor(scope, scanState),
       hasMore: scanState.hasMore,
       fullScan: scanState.fullScan,
-      skippedImages: normalized.skippedImages,
+      imageItems: normalized.imageItems,
+      multiVideoItems: normalized.multiVideoItems,
+      skippedUnsupported: normalized.skippedUnsupported,
+      skippedImages: 0,
       skippedDuplicates: normalized.skippedDuplicates,
     });
     persist(rootDir, record);

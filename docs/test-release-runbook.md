@@ -39,6 +39,7 @@ npm run check
 | `test-bookmarked-sync.mjs` | 收藏分页、POST 表单、节流常量、同 ID 作用域隔离 |
 | `test-liked-sync.mjs` | 喜欢页运行时请求和完整扫描循环 |
 | `test-liked-state.mjs` | 喜欢归一化、状态合并和最高画质排序 |
+| `test-media-parts.mjs` | 多图、live photo、显式多视频、路径和逐段续传契约 |
 | `test-performance.mjs` | 阶段统计、快速官方总数、候选复用、检查点批量刷新和性能文件 |
 
 测试失败不能通过删除断言或只放宽校验解决。先判断实现缺陷还是规格变更；规格变更必须同步更新产品规格和设计。
@@ -57,6 +58,7 @@ npm run check
 | FR-08 暂停继续 | 记录恢复与静态断言 | 暂停、刷新、继续后跳过已下载项 |
 | FR-09 可观测性 | 扩展检查与静态断言 | UI 北京时间，日志可定位失败 |
 | FR-09 可观测性 | `test-performance`、扩展检查 | 快速总数与性能文件能区分网络、主动等待和磁盘开销 |
+| FR-10 多媒体续传 | `test-media-parts`、`test-download-record`、backend 核心测试 | 图文和多段作品逐段落盘，暂停后只续未完成段 |
 
 ## 5. 人工冒烟测试
 
@@ -90,7 +92,7 @@ npm run check
 
 1. 点击“下载收藏视频”。
 2. 确认日志按页推进，页面间隔不出现高频连续请求。
-3. 确认图文显示跳过计数。
+3. 确认收藏远端总数在第一页扫描前或同时出现，且第一页没有重复请求。
 4. 至少完成一个收藏视频下载。
 5. 确认视频位于 `data/收藏/视频`。
 6. 确认 `db_bookmarked.json` 包含 downloaded ID。
@@ -112,6 +114,18 @@ npm run check
 3. 验证 IndexedDB 存在 `liked:<id>` 和 `bookmarked:<id>` 两条记录。
 4. 验证两条记录的 `downloaded` 状态互不覆盖。
 5. 验证文件夹记录 `items` 中 source 正确。
+
+
+### 5.7 图文与多段视频
+
+1. 按 [媒体案例目录](media-case-catalog.md) 把案例加入喜欢或收藏测试范围。
+2. 图文应写入 `data/<作用域>/图片/<awemeId>/<序号>.<扩展名>`，顺序与作品一致。
+3. 多段视频应写入 `data/<作用域>/视频/<awemeId>/<序号>.mp4`，每段日志记录实际候选画质。
+4. 下载一段后暂停或重载扩展，检查 `download-state.json` 的 `downloadedMediaParts`。
+5. 点击继续后，日志应出现“跳过已完成媒体段”，不得重新传输已完成文件。
+6. 全部内容段完成前作品不得是 `downloaded`；完成后 manifest 的 `parts` 数量与实际文件一致。
+7. 对同一案例分别跑喜欢与收藏，验证 scope 路径和状态互不覆盖。
+8. backend 使用同一目录 resume，验证能读取插件逐段记录并继续。
 
 ## 6. 故障注入
 

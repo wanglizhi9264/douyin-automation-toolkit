@@ -25,6 +25,8 @@ const recovered = recoverDownloadedRecords([
 ], [
   {
     awemeId: "100",
+    candidateRank: 2,
+    qualityFallbackReason: "#1 Failed to fetch",
     downloadStatus: "downloaded",
     resolution: "1440x2560",
     videoPath: video100,
@@ -56,6 +58,8 @@ assert.equal(patched.downloadStatus, "downloaded");
 assert.equal(patched.desc, "keep-local-description");
 assert.equal(patched.downloadQualityLabel, "1440x2560");
 assert.equal(patched.downloadVideoPath, video100);
+assert.equal(patched.downloadCandidateRank, 2);
+assert.match(patched.downloadQualityFallbackReason, /Failed to fetch/);
 assert.equal(patched.updatedAt, now);
 
 const reconstructed = recovered.find((item) => item.awemeId === "200");
@@ -92,6 +96,43 @@ assert.equal(scopedRecovered[0].index, 11);
 assert.equal(scopedRecovered[0].downloadStatus, "downloaded");
 assert.equal(scopedRecovered[0].downloadVideoPath, "data/bookmarked/same.mp4");
 
+const partialRecovered = recoverDownloadedRecords([
+  {
+    awemeId: "partial",
+    index: 12,
+    source: "bookmarked",
+    status: "already_favorited",
+    downloadStatus: "failed",
+    mediaType: "multi_image",
+    mediaParts: [
+      { partId: "image-1", kind: "image", order: 1, url: "https://image/1.jpg" },
+      { partId: "image-2", kind: "image", order: 2, url: "https://image/2.jpg" },
+    ],
+  },
+], [
+  {
+    awemeId: "partial",
+    source: "bookmarked",
+    status: "already_favorited",
+    downloadStatus: "failed",
+    mediaType: "multi_image",
+    mediaCount: 2,
+    mediaPaths: ["data/收藏/图片/partial/01.jpg"],
+    downloadedMediaParts: {
+      "image-1": {
+        partId: "image-1",
+        kind: "image",
+        status: "downloaded",
+        path: "data/收藏/图片/partial/01.jpg",
+      },
+    },
+  },
+], { defaultSource: "bookmarked", now });
+assert.equal(partialRecovered.length, 1);
+assert.equal(partialRecovered[0].downloadStatus, "not_started");
+assert.equal(partialRecovered[0].downloadedPartCount, 1);
+assert.equal(partialRecovered[0].downloadedMediaParts["image-1"].status, "downloaded");
+assert.deepEqual(partialRecovered[0].downloadMediaPaths, ["data/收藏/图片/partial/01.jpg"]);
 const sidebarSource = fs.readFileSync(new URL("../src/sidebar/app.js", import.meta.url), "utf8");
 assert.match(sidebarSource, /folderUserId && currentUserId && folderUserId !== currentUserId/);
 assert.match(sidebarSource, /record\.user = \{/);

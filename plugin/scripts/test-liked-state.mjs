@@ -97,7 +97,8 @@ const normalized = normalizeLikedPageItems([
 
 assert.equal(normalized.items.length, 2);
 assert.equal(normalized.skippedDuplicates, 1);
-assert.equal(normalized.skippedImages, 1);
+assert.equal(normalized.skippedImages, 0);
+assert.equal(normalized.skippedUnsupported, 1);
 assert.equal(normalized.items[0].downloadStatus, "downloaded");
 assert.equal(normalized.items[0].downloadVideoPath, "data/liked/1.mp4");
 assert.equal(normalized.items[0].desc, "refreshed");
