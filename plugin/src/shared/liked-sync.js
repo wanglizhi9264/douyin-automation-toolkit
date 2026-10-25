@@ -150,3 +150,20 @@ export function normalizeLikedPageItems(awemeList, existingItems, seenIds = new 
 export function likedRetryDelayMs(attempt) {
   return 7000 * Math.max(1, Number(attempt || 1));
 }
+
+export function reconcileLikedLocalIds(localIds, currentIds) {
+  const local = new Set([...(localIds || [])].map(String));
+  const current = new Set([...(currentIds || [])].map(String));
+  const archivedIds = [];
+  let currentLocal = 0;
+  for (const awemeId of local) {
+    if (current.has(awemeId)) currentLocal += 1;
+    else archivedIds.push(awemeId);
+  }
+  return {
+    localTotal: local.size,
+    currentLocal,
+    archivedLocal: archivedIds.length,
+    archivedIds,
+  };
+}

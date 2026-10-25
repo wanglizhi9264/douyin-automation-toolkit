@@ -470,3 +470,41 @@ export function buildEnhancedDownloadReportHtml(record, folderLabel = "", logs =
   })();
   </script></body></html>`;
 }
+
+function safeJsonForScript(value) {
+  return JSON.stringify(value)
+    .replaceAll("<", "\\u003c")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
+}
+
+export function buildLocalLibraryHtml(record, folderLabel = "") {
+  const items = (Array.isArray(record?.items) ? record.items : []).map((item) => ({
+    id: String(item.awemeId || ""),
+    index: number(item.index),
+    scope: item.source === "bookmarked" ? "bookmarked" : "liked",
+    status: item.downloadStatus || "not_started",
+    media: item.mediaType || "video",
+    author: item.authorName || "",
+    desc: item.desc || "",
+    url: /^https:\/\/www\.douyin\.com\//.test(item.url || "") ? item.url : "",
+    quality: qualityLabel(item),
+    path: item.videoPath || item.mediaPaths?.[0] || item.imagePaths?.[0] || "",
+    error: item.lastError || "",
+    updatedAt: item.updatedAt || "",
+  }));
+  const counts = {
+    total: items.length,
+    downloaded: items.filter((item) => item.status === "downloaded").length,
+    pending: items.filter((item) => !["downloaded", "failed"].includes(item.status)).length,
+    failed: items.filter((item) => item.status === "failed").length,
+    liked: items.filter((item) => item.scope === "liked").length,
+    bookmarked: items.filter((item) => item.scope === "bookmarked").length,
+    likedArchived: Math.max(0, Number(record?.localCounts?.likedArchived || 0)),
+  };
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>抖音本地库</title><style>
+  :root{color-scheme:light;--bg:#f5f6f8;--panel:#fff;--text:#1d2939;--muted:#667085;--line:#e4e7ec;--blue:#1677ff;--green:#067647;--red:#b42318}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:1280px;margin:auto;padding:22px}.hero,.toolbar,.list{background:var(--panel);border:1px solid var(--line);border-radius:14px}.hero{padding:20px}.hero h1{margin:0;font-size:24px}.meta{color:var(--muted);margin:5px 0 0}.stats{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-top:16px}.stat{padding:12px;border-radius:10px;background:#f8fafc}.stat span{display:block;color:var(--muted);font-size:12px}.stat b{font-size:23px}.toolbar{display:grid;grid-template-columns:minmax(240px,2fr) repeat(3,minmax(120px,1fr)) auto;gap:8px;margin:12px 0;padding:12px;position:sticky;top:0;z-index:3}.toolbar input,.toolbar select,.toolbar button{min-height:38px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:#fff}.toolbar button{cursor:pointer}.list{overflow:hidden}.row{display:grid;grid-template-columns:80px minmax(190px,1fr) 120px 120px minmax(180px,1fr);gap:12px;padding:12px 14px;border-bottom:1px solid var(--line);align-items:start}.row.header{color:var(--muted);font-size:12px;background:#f8fafc}.title{font-weight:650}.sub{display:block;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.badge{display:inline-block;padding:2px 8px;border-radius:99px;background:#f2f4f7}.badge.downloaded{color:var(--green);background:#ecfdf3}.badge.failed{color:var(--red);background:#fef3f2}a{color:var(--blue);text-decoration:none}.pager{display:flex;justify-content:space-between;align-items:center;padding:12px 14px}.pager div{display:flex;gap:8px}.empty{padding:50px;text-align:center;color:var(--muted)}@media(max-width:760px){.wrap{padding:8px}.stats{grid-template-columns:repeat(3,1fr)}.toolbar{position:static;grid-template-columns:1fr 1fr}.row{grid-template-columns:58px 1fr 100px}.row>*:nth-child(4),.row>*:nth-child(5){display:none}}
+  </style></head><body><main class="wrap"><section class="hero"><h1>抖音本地库</h1><p class="meta">${escapeHtml(folderLabel || "已授权目录")} · 更新于 ${escapeHtml(record.generatedAt || "-")}</p><div class="stats"><div class="stat"><span>全部</span><b>${counts.total}</b></div><div class="stat"><span>已下载</span><b>${counts.downloaded}</b></div><div class="stat"><span>待下载</span><b>${counts.pending}</b></div><div class="stat"><span>失败</span><b>${counts.failed}</b></div><div class="stat"><span>喜欢</span><b>${counts.liked}</b></div><div class="stat"><span>消失留存</span><b>${counts.likedArchived}</b></div><div class="stat"><span>收藏</span><b>${counts.bookmarked}</b></div></div></section><section class="toolbar"><input id="q" placeholder="搜索作品 ID、作者或描述"><select id="scope"><option value="">全部来源</option><option value="liked">喜欢</option><option value="bookmarked">收藏</option></select><select id="status"><option value="">全部状态</option><option value="downloaded">已下载</option><option value="not_started">待下载</option><option value="failed">失败</option></select><select id="media"><option value="">全部类型</option><option value="video">视频</option><option value="multi_image">图文</option><option value="mixed">混合</option></select><button id="reset">重置</button></section><section class="list"><div class="row header"><span>序号</span><span>作品</span><span>状态</span><span>来源/类型</span><span>画质/文件</span></div><div id="rows"></div><div class="pager"><span id="summary"></span><div><button id="prev">上一页</button><button id="next">下一页</button></div></div></section></main><script>
+  const DATA=${safeJsonForScript(items)};const PAGE=100;let page=1;const q=document.querySelector('#q'),scope=document.querySelector('#scope'),status=document.querySelector('#status'),media=document.querySelector('#media'),rows=document.querySelector('#rows'),summary=document.querySelector('#summary'),prev=document.querySelector('#prev'),next=document.querySelector('#next'),reset=document.querySelector('#reset');const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));function filtered(){const text=q.value.trim().toLowerCase();return DATA.filter(x=>(!text||[x.id,x.author,x.desc].join(' ').toLowerCase().includes(text))&&(!scope.value||x.scope===scope.value)&&(!status.value||x.status===status.value)&&(!media.value||x.media===media.value)).sort((a,b)=>b.index-a.index)}function render(){const all=filtered(),pages=Math.max(1,Math.ceil(all.length/PAGE));page=Math.min(Math.max(1,page),pages);const current=all.slice((page-1)*PAGE,page*PAGE);rows.innerHTML=current.length?current.map(x=>'<div class="row"><span>'+x.index+'</span><span><span class="title">'+(x.url?'<a target="_blank" rel="noreferrer" href="'+esc(x.url)+'">'+esc(x.id)+'</a>':esc(x.id))+'</span><span class="sub">'+esc(x.author||x.desc||'未知作者')+'</span></span><span><i class="badge '+esc(x.status)+'">'+({downloaded:'已下载',failed:'失败',not_started:'待下载'}[x.status]||esc(x.status))+'</i></span><span>'+esc(x.scope==='bookmarked'?'收藏':'喜欢')+'<span class="sub">'+esc(x.media)+'</span></span><span>'+esc(x.quality)+'<span class="sub" title="'+esc(x.error||x.path)+'">'+esc(x.error||x.path||'-')+'</span></span></div>').join(''):'<div class="empty">没有匹配的作品</div>';summary.textContent='匹配 '+all.length+' 条 · 第 '+page+' / '+pages+' 页';prev.disabled=page<=1;next.disabled=page>=pages}let timer;q.addEventListener('input',()=>{page=1;clearTimeout(timer);timer=setTimeout(render,100)});[scope,status,media].forEach(x=>x.addEventListener('change',()=>{page=1;render()}));prev.onclick=()=>{page--;render()};next.onclick=()=>{page++;render()};reset.onclick=()=>{q.value='';scope.value=status.value=media.value='';page=1;render()};render();
+  </script></body></html>`;
+}

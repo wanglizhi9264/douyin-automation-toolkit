@@ -177,7 +177,7 @@ assert.match(
   sidebarSource,
   /if \(scope === "bookmarked"\) \{\s*await runBookmarkedDownloadFlow\(/,
 );
-assert.match(sidebarSource, /folderRecord\?\.current\?\.scope \|\| fallbackScope/);
+assert.match(sidebarSource, /folderProgress\?\.current\?\.scope \|\| fallbackScope/);
 assert.match(sidebarSource, /continueDownloadBtn/);
 
 console.log("OK: bookmarked pagination, scoped resume, POST API, and overlap tests passed");

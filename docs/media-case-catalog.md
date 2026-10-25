@@ -9,7 +9,7 @@
 - 已确认信号：公开跳转为 `/share/slides/...`，`schema_type=37`、`is_slides=1`
 - 预期：`mediaType=multi_image`；原图按 `image-1..n` 顺序写入图片目录；不重复下载顶层合成视频
 - 自动覆盖：`plugin/scripts/test-media-parts.mjs` 的 image carousel fixture
-- 实机状态：待在登录浏览器中按发布手册 5.7 完成文件数和顺序核对
+- 实机状态：待在登录浏览器中按 [测试与发布](test-release-runbook.md) 的媒体类型、分段和续传验收要求完成文件数和顺序核对；旧版章节编号不再适用
 
 ## CASE-MV-001 用户提供的多片段参考
 

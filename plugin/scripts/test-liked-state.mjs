@@ -4,6 +4,7 @@ import {
   createLikedScanState,
   normalizeLikedPageItems,
   parseLikedProfile,
+  reconcileLikedLocalIds,
 } from "../src/shared/liked-sync.js";
 import { pickVideoCandidates } from "../src/shared/api.js";
 
@@ -138,6 +139,15 @@ const qualityCandidates = pickVideoCandidates({
   },
 }, { preferBestQuality: true });
 assert.equal(qualityCandidates[0].url, "https://video/1440.mp4");
+
+const reconciliation = reconcileLikedLocalIds(
+  new Set(["1", "2", "3", "3"]),
+  new Set(["2", "3", "4"]),
+);
+assert.equal(reconciliation.localTotal, 3);
+assert.equal(reconciliation.currentLocal, 2);
+assert.equal(reconciliation.archivedLocal, 1);
+assert.deepEqual(reconciliation.archivedIds, ["1"]);
 
 console.log("OK: liked scan state and merge tests passed");
 

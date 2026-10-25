@@ -57,47 +57,77 @@ export async function importProgress(progress) {
   return items.length;
 }
 
-export async function summarize() {
+export async function summarize({ items: suppliedItems = null } = {}) {
   const [items, config, logs, lastImport] = await Promise.all([
-    getAll("items"),
+    suppliedItems ? Promise.resolve(suppliedItems) : getAll("items"),
     loadConfig(),
     recentLogs(),
     getConfig("lastImport", null),
   ]);
   const counts = {};
-  for (const item of items) counts[item.status || "unknown"] = (counts[item.status || "unknown"] || 0) + 1;
-  const favoriteApiItems = items.filter((item) => item.source === "liked" || item.source === "favorite_api");
-  const success = items.filter((item) => SUCCESS_STATUSES.has(item.status)).length;
-  const pending = items.filter((item) => item.status === "pending").length;
-  const paused = items.filter((item) => String(item.status || "").startsWith("paused") || item.status === "blocked");
-  const auditPending = items.filter((item) => item.status === "pending" && String(item.lastError || "").includes("审计发现未真正收藏"));
-  const sortedByUpdate = [...items].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
-  const cursor = sortedByUpdate[0] || null;
+  let likedTotal = 0;
+  let likedSyncedTo = -1;
+  let success = 0;
+  let pending = 0;
+  let runnableFavorite = 0;
+  let paused = 0;
+  let auditPending = 0;
+  let eligible = 0;
+  let downloaded = 0;
+  let downloadPending = 0;
+  let failed = 0;
+  let cursor = null;
+  let downloadCursor = null;
+  for (const item of items) {
+    const status = item.status || "unknown";
+    counts[status] = (counts[status] || 0) + 1;
+    const updatedAt = String(item.updatedAt || "");
+    if (!cursor || updatedAt > String(cursor.updatedAt || "")) cursor = item;
+    if (item.source === "liked" || item.source === "favorite_api") {
+      likedTotal += 1;
+      likedSyncedTo = Math.max(likedSyncedTo, Number(item.index ?? -1));
+    }
+    if (SUCCESS_STATUSES.has(item.status)) success += 1;
+    if (item.status === "pending") pending += 1;
+    const isPaused = String(item.status || "").startsWith("paused") || item.status === "blocked";
+    if (isPaused) paused += 1;
+    if (!SUCCESS_STATUSES.has(item.status) && !isPaused) runnableFavorite += 1;
+    if (item.status === "pending" && String(item.lastError || "").includes("审计发现未真正收藏")) auditPending += 1;
+    const isEligible = ["favorited", "already_favorited"].includes(item.status);
+    if (isEligible) eligible += 1;
+    if (item.downloadStatus === "downloaded") downloaded += 1;
+    if (isEligible && item.downloadStatus !== "downloaded") downloadPending += 1;
+    if (item.downloadStatus === "failed") failed += 1;
+    if (
+      item.downloadStatus && item.downloadStatus !== "not_started"
+      && (!downloadCursor || updatedAt > String(downloadCursor.updatedAt || ""))
+    ) downloadCursor = item;
+  }
   const favorite = {
-    total: favoriteApiItems.length,
-    completed: items.filter((item) => SUCCESS_STATUSES.has(item.status)).length,
-    pending: items.filter((item) => !SUCCESS_STATUSES.has(item.status) && item.status !== "blocked" && !String(item.status || "").startsWith("paused")).length,
-    paused: paused.length,
-    auditPending: auditPending.length,
+    total: likedTotal,
+    completed: success,
+    pending: runnableFavorite,
+    paused,
+    auditPending,
     cursor: cursor,
   };
   const download = {
-    eligible: items.filter((item) => ["favorited", "already_favorited"].includes(item.status)).length,
-    downloaded: items.filter((item) => item.downloadStatus === "downloaded").length,
-    pending: items.filter((item) => ["favorited", "already_favorited"].includes(item.status) && item.downloadStatus !== "downloaded").length,
-    failed: items.filter((item) => item.downloadStatus === "failed").length,
-    cursor: sortedByUpdate.find((item) => item.downloadStatus && item.downloadStatus !== "not_started") || null,
+    eligible,
+    downloaded,
+    pending: downloadPending,
+    failed,
+    cursor: downloadCursor,
   };
   return {
     config,
     counts,
     total: items.length,
-    likedTotal: favoriteApiItems.length,
-    likedSyncedTo: favoriteApiItems.length ? Math.max(...favoriteApiItems.map((item) => Number(item.index ?? -1))) : -1,
+    likedTotal,
+    likedSyncedTo,
     success,
     pending,
-    paused: paused.length,
-    auditPending: auditPending.length,
+    paused,
+    auditPending,
     cursor,
     favorite,
     download,

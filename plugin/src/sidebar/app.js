@@ -11,7 +11,8 @@ import {
 } from "../shared/api.js";
 import { chooseDownloadTarget, downloadUrl, downloadVerifiedMedia, getStoredDownloadTarget, readTextFile, writeFile } from "../shared/download.js";
 import { recoverDownloadedRecords } from "../shared/download-record.js";
-import { buildEnhancedDownloadReportHtml } from "../shared/report.js";
+import { createDownloadIndex, markIndexCompleted, serializeDownloadIndex } from "../shared/download-index.js";
+import { buildLocalLibraryHtml } from "../shared/report.js";
 import {
   advanceLikedScanState,
   createLikedScanState,
@@ -21,6 +22,7 @@ import {
   likedRetryDelayMs,
   normalizeLikedPageItems,
   parseLikedProfile,
+  reconcileLikedLocalIds,
 } from "../shared/liked-sync.js";
 import {
   advanceBookmarkedScanState,
@@ -44,11 +46,14 @@ let configHydrated = false;
 let stopRequested = false;
 let running = false;
 let downloadRunning = false;
+let oneClickRunning = false;
+const SHARED_CONVERSATION_NAME = "王立志";
 let downloadPauseRequested = false;
 let downloadBatchState = {
   scope: "liked",
   total: 0,
   completed: 0,
+  sessionCompleted: 0,
   inspected: 0,
   currentOrder: 0,
   currentIndex: null,
@@ -59,16 +64,24 @@ let downloadBatchState = {
 let downloadRecordCache = {
   targetKey: "",
   record: null,
+  loadingPromise: null,
 };
-let currentView = "home";
+let localFolderCountCache = { targetKey: "", loadedAt: 0, counts: null, loadingPromise: null };
+let downloadIndexCache = { targetKey: "", index: null, loadingPromise: null };
+let compactWriteQueue = {
+  targetKey: "",
+  target: null,
+  entries: new Map(),
+  timer: null,
+  flushing: null,
+};
+let currentView = "download";
 let currentDownloadScope = "liked";
 
 let activePerformanceTracker = null;
 let lastPerformanceSummary = null;
 let activeDownloadTarget = null;
 const CANDIDATE_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
-const FULL_ARTIFACT_EVERY_ITEMS = 10;
-const FULL_ARTIFACT_MAX_INTERVAL_MS = 30 * 1000;
 let artifactCheckpoint = {
   targetKey: "",
   itemsSinceFull: 0,
@@ -76,6 +89,7 @@ let artifactCheckpoint = {
 };
 let scheduledRenderTimer = null;
 let remoteProfileCache = { result: null, loadedAt: 0 };
+let remoteProfileRequestInFlight = null;
 let bookmarkedOverviewCache = { page: null, loadedAt: 0 };
 let bookmarkedOverviewInFlight = null;
 const BOOKMARKED_OVERVIEW_MAX_AGE_MS = 60 * 1000;
@@ -147,9 +161,6 @@ async function finalizeDownloadPerformance() {
   const target = activeDownloadTarget;
   if (!tracker) return;
   try {
-    if (target?.kind === "filesystem") {
-      await persistDownloadArtifacts(target, downloadBatchState, { forceFull: true });
-    }
     lastPerformanceSummary = summarizePerformance(tracker);
     if (target?.kind === "filesystem") {
       await writeFile(
@@ -174,6 +185,9 @@ async function finalizeDownloadPerformance() {
   }
 }
 function scheduleRender(delayMs = 120) {
+  // Download progress is updated directly. Rebuilding the entire sidebar here
+  // would recreate the author checkboxes for every page/log entry and flicker.
+  if (downloadRunning) return;
   if (scheduledRenderTimer != null) return;
   scheduledRenderTimer = setTimeout(() => {
     scheduledRenderTimer = null;
@@ -200,10 +214,20 @@ async function requestSelfProfile({ maxAgeMs = 0, reason = "summary" } = {}) {
     recordStage("profile_cache", 0, { reason, ok: true });
     return remoteProfileCache.result;
   }
+  if (remoteProfileRequestInFlight) {
+    recordStage("profile_request_join", 0, { reason, ok: true });
+    return await remoteProfileRequestInFlight;
+  }
   remoteProfileSummary = { ...remoteProfileSummary, status: "loading", error: "" };
   scheduleRender();
   const startedAt = timingNow();
-  const result = await sendPageRequest("GET_SELF_PROFILE", {}, 30000);
+  remoteProfileRequestInFlight = sendPageRequest("GET_SELF_PROFILE", {}, 30000);
+  let result;
+  try {
+    result = await remoteProfileRequestInFlight;
+  } finally {
+    remoteProfileRequestInFlight = null;
+  }
   const durationMs = timingNow() - startedAt;
   recordStage("profile_api", durationMs, { reason, ok: Boolean(result?.ok) });
   remoteProfileCache = { result, loadedAt: Date.now() };
@@ -316,14 +340,21 @@ async function refreshRemoteProfileSummary({ silent = false } = {}) {
   }
 }
 
+let selectedFollowingAuthorsCache = null;
+
 async function getSelectedFollowingAuthors() {
+  if (Array.isArray(selectedFollowingAuthorsCache)) return [...selectedFollowingAuthorsCache];
   const result = await chrome.storage.local.get(["selectedFollowingAuthors"]);
-  return Array.isArray(result.selectedFollowingAuthors) ? result.selectedFollowingAuthors : [];
+  selectedFollowingAuthorsCache = Array.isArray(result.selectedFollowingAuthors)
+    ? [...new Set(result.selectedFollowingAuthors.filter(Boolean).map(String))]
+    : [];
+  return [...selectedFollowingAuthorsCache];
 }
 
 async function setSelectedFollowingAuthors(authorUids) {
+  selectedFollowingAuthorsCache = [...new Set((authorUids || []).filter(Boolean).map(String))];
   await chrome.storage.local.set({
-    selectedFollowingAuthors: [...new Set((authorUids || []).filter(Boolean).map(String))],
+    selectedFollowingAuthors: selectedFollowingAuthorsCache,
   });
 }
 
@@ -353,9 +384,96 @@ function setDownloadStatus(text) {
 }
 
 function setView(view) {
-  currentView = view;
-  $("homeView").classList.toggle("hidden", view !== "home");
-  $("downloadTaskView").classList.toggle("hidden", view !== "download-task");
+  const normalized = view === "favorite" ? "favorite" : "download";
+  currentView = normalized;
+  $("downloadView").classList.toggle("hidden", normalized !== "download");
+  $("favoriteView").classList.toggle("hidden", normalized !== "favorite");
+  $("downloadTabBtn").classList.toggle("active", normalized === "download");
+  $("favoriteTabBtn").classList.toggle("active", normalized === "favorite");
+}
+
+let followingSyncInFlight = null;
+
+function normalizeFollowingAuthor(user) {
+  const uid = String(user?.uid || user?.id || "");
+  const secUid = String(user?.sec_uid || user?.secUid || user?.sec_user_id || "");
+  if (!uid || !secUid) return null;
+  return {
+    uid,
+    secUid,
+    nickname: String(user?.nickname || user?.name || "未命名作者"),
+    awemeCount: Math.max(0, Number(user?.aweme_count || user?.awemeCount || 0)),
+  };
+}
+
+async function getCachedFollowingAuthors() {
+  const value = await getConfig("followingAuthors", []);
+  return Array.isArray(value) ? value : [];
+}
+
+async function syncFollowingAuthors({ force = false } = {}) {
+  if (followingSyncInFlight) return await followingSyncInFlight;
+  followingSyncInFlight = (async () => {
+    const cached = await getCachedFollowingAuthors();
+    const updatedAt = Number(await getConfig("followingAuthorsUpdatedAt", 0)) || 0;
+    if (!force && cached.length && Date.now() - updatedAt < 10 * 60 * 1000) return cached;
+    const profileResult = await requestSelfProfile({ maxAgeMs: 5 * 60 * 1000, reason: "following_list" });
+    if (!profileResult?.ok) throw new Error(`读取关注列表前无法确认账号：${resultError(profileResult)}`);
+    const profile = profileUser(profileResult) || {};
+    const userId = String(profile.uid || profile.id || "");
+    const secUid = String(profile.sec_uid || profile.secUid || profile.sec_user_id || "");
+    if (!userId || !secUid) throw new Error("当前账号缺少关注列表所需的 user_id 或 sec_uid");
+    const authors = [];
+    const seen = new Set();
+    let offset = 0;
+    let maxTime = 0;
+    let minTime = 0;
+    let pageNumber = 0;
+    for (;;) {
+      const page = await sendPageRequest("FETCH_FOLLOWING_PAGE", {
+        userId,
+        secUid,
+        offset,
+        count: 20,
+        maxTime,
+        minTime,
+      }, 60000);
+      if (!page?.ok || !Array.isArray(page.users)) throw new Error(`读取关注列表失败：${resultError(page)}`);
+      pageNumber += 1;
+      for (const raw of page.users) {
+        const author = normalizeFollowingAuthor(raw);
+        if (!author || seen.has(author.uid)) continue;
+        seen.add(author.uid);
+        authors.push(author);
+      }
+      logLine(`同步关注作者：第 ${pageNumber} 页，累计 ${authors.length} 人`, {
+        type: "following_page_checked",
+        page: pageNumber,
+        count: authors.length,
+      });
+      if (!page.hasMore || !page.users.length) break;
+      const nextOffset = Number(page.offset ?? (offset + page.users.length));
+      const nextMaxTime = page.maxTime ?? maxTime;
+      const nextMinTime = page.minTime ?? minTime;
+      if (nextOffset === offset && String(nextMaxTime) === String(maxTime) && String(nextMinTime) === String(minTime)) {
+        throw new Error("关注列表游标没有前进，已停止以避免死循环");
+      }
+      offset = nextOffset;
+      maxTime = nextMaxTime;
+      minTime = nextMinTime;
+      await waitTracked("following_list_wait", 1200, { page: pageNumber });
+    }
+    await Promise.all([
+      setConfig("followingAuthors", authors),
+      setConfig("followingAuthorsUpdatedAt", Date.now()),
+    ]);
+    return authors;
+  })();
+  try {
+    return await followingSyncInFlight;
+  } finally {
+    followingSyncInFlight = null;
+  }
 }
 
 function updateDownloadBatchProgress() {
@@ -379,7 +497,8 @@ function updateDownloadBatchProgress() {
   const resolutionLine = state.currentResolution ? `分辨率：${escapeHtml(state.currentResolution)}` : "";
   const progressHtml = [
     `状态：${escapeHtml(state.phase)}`,
-    `进度：${escapeHtml(state.completed)} / ${escapeHtml(state.total)}`,
+    `总体完成：${escapeHtml(state.completed)} / ${escapeHtml(state.total)}`,
+    `本次新增：${escapeHtml(state.sessionCompleted || 0)} · 已检查：${escapeHtml(state.inspected || 0)}`,
     currentLine,
     resolutionLine,
   ].filter(Boolean).join("<br>");
@@ -391,13 +510,84 @@ function getDownloadRecordPath() {
   return "data/.appdata/download-state.json";
 }
 
+function getDownloadProgressPath() {
+  return "data/.appdata/download-progress.json";
+}
+
+function getDownloadCountsPath() {
+  return "data/.appdata/download-counts.json";
+}
+
+function getDownloadIndexPath() {
+  return "data/.appdata/download-index.json";
+}
+
 function getDownloadReportPath() {
   return "本地库.html";
 }
 
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function resetCompactWriteQueue(target) {
+  const targetKey = getTargetCacheKey(target);
+  if (compactWriteQueue.targetKey === targetKey) return;
+  if (compactWriteQueue.timer) clearTimeout(compactWriteQueue.timer);
+  compactWriteQueue = {
+    targetKey,
+    target,
+    entries: new Map(),
+    timer: null,
+    flushing: null,
+  };
+}
+
+async function flushCompactWrites(target = compactWriteQueue.target) {
+  if (!target || target.kind !== "filesystem") return;
+  resetCompactWriteQueue(target);
+  if (compactWriteQueue.timer) {
+    clearTimeout(compactWriteQueue.timer);
+    compactWriteQueue.timer = null;
+  }
+  if (compactWriteQueue.flushing) await compactWriteQueue.flushing;
+  if (!compactWriteQueue.entries.size) return;
+  const entries = [...compactWriteQueue.entries.entries()];
+  compactWriteQueue.entries.clear();
+  compactWriteQueue.flushing = Promise.all(
+    entries.map(([path, content]) => writeFile(target, path, content)),
+  );
+  try {
+    await compactWriteQueue.flushing;
+  } finally {
+    compactWriteQueue.flushing = null;
+    if (compactWriteQueue.entries.size && !compactWriteQueue.timer) {
+      compactWriteQueue.timer = setTimeout(() => {
+        compactWriteQueue.timer = null;
+        void flushCompactWrites(target);
+      }, 1200);
+    }
+  }
+}
+
+function scheduleCompactWrite(target, path, content) {
+  if (target?.kind !== "filesystem") return;
+  resetCompactWriteQueue(target);
+  compactWriteQueue.target = target;
+  compactWriteQueue.entries.set(path, content);
+  if (compactWriteQueue.timer) return;
+  compactWriteQueue.timer = setTimeout(() => {
+    compactWriteQueue.timer = null;
+    void flushCompactWrites(target);
+  }, 1200);
+}
+
 function getSourceFolder(source) {
   if (source === "bookmarked") return "data/收藏";
-  if (source === "following") return "data/关注/视频";
+  if (source === "following") return "data/关注";
   return "data/点赞";
 }
 
@@ -456,6 +646,13 @@ async function readDownloadRecord(target) {
     const text = await readTextFile(target, getDownloadRecordPath());
     if (!text) return null;
     const record = JSON.parse(text);
+    try {
+      const progressText = await readTextFile(target, getDownloadProgressPath());
+      const progress = progressText ? JSON.parse(progressText) : null;
+      if (progress?.current && String(progress.generatedAt || "") >= String(record.generatedAt || "")) {
+        record.current = { ...(record.current || {}), ...progress.current };
+      }
+    } catch {}
     return Array.isArray(record?.items) ? record : null;
   } catch {
     return null;
@@ -465,33 +662,92 @@ async function readDownloadRecord(target) {
 async function getCachedDownloadRecord(target, { force = false } = {}) {
   const key = getTargetCacheKey(target);
   if (!force && key && downloadRecordCache.targetKey === key) {
-    return downloadRecordCache.record;
+    if (downloadRecordCache.record) return downloadRecordCache.record;
+    if (downloadRecordCache.loadingPromise) return await downloadRecordCache.loadingPromise;
   }
-  const record = await readDownloadRecord(target);
-  downloadRecordCache = { targetKey: key, record };
-  return record;
+  const loadingPromise = readDownloadRecord(target);
+  downloadRecordCache = { targetKey: key, record: null, loadingPromise };
+  try {
+    const record = await loadingPromise;
+    downloadRecordCache = { targetKey: key, record, loadingPromise: null };
+    return record;
+  } catch (error) {
+    downloadRecordCache = { targetKey: key, record: null, loadingPromise: null };
+    throw error;
+  }
+}
+
+async function readDownloadProgressRecord(target) {
+  if (target?.kind !== "filesystem") return null;
+  try {
+    const text = await readTextFile(target, getDownloadProgressPath());
+    const progress = text ? JSON.parse(text) : null;
+    return progress?.current ? progress : null;
+  } catch {
+    return null;
+  }
 }
 
 function setCachedDownloadRecord(target, record) {
   downloadRecordCache = {
     targetKey: getTargetCacheKey(target),
     record,
+    loadingPromise: null,
   };
 }
 
-function buildDownloadRecord(items, state) {
+function buildDownloadRecord(items, state, previousRecord = null) {
   const eligibleItems = items
     .filter((item) => ["favorited", "already_favorited"].includes(item.status))
     .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0));
+  const currentRecordItems = eligibleItems.map((item) => ({
+    awemeId: item.awemeId,
+    index: item.index,
+    source: item.source || "liked",
+    status: item.status,
+    downloadStatus: item.downloadStatus || "not_started",
+    mediaType: item.mediaType || "video",
+    mediaCount: Number(item.mediaCount || item.mediaParts?.length || 1),
+    downloadedPartCount: Number(item.downloadedPartCount || 0),
+    mediaPaths: Array.isArray(item.downloadMediaPaths) ? item.downloadMediaPaths : [],
+    imagePaths: Array.isArray(item.downloadImagePaths) ? item.downloadImagePaths : [],
+    downloadedMediaParts: item.downloadedMediaParts || {},
+    mediaParts: Array.isArray(item.mediaParts) ? item.mediaParts : [],
+    desc: item.desc || "",
+    authorUid: item.authorUid || "",
+    authorName: item.authorName || "",
+    createTime: item.createTime || 0,
+    resolution: item.downloadQualityLabel || "",
+    width: item.downloadWidth || 0,
+    height: item.downloadHeight || 0,
+    bitrate: item.downloadBitrate || 0,
+    codec: item.downloadCodec || "",
+    fps: item.downloadFps || 0,
+    size: item.downloadSize || 0,
+    candidateRank: item.downloadCandidateRank || 0,
+    qualityFallbackReason: item.downloadQualityFallbackReason || "",
+    videoPath: item.downloadVideoPath || "",
+    coverPath: item.downloadCoverPath || "",
+    url: item.url || "",
+    lastError: item.lastError || "",
+    updatedAt: item.updatedAt || "",
+  }));
+  const recordKey = (item) => `${downloadRecordItemScope(item)}:${String(item.awemeId || "")}`;
+  const mergedItems = new Map();
+  for (const item of previousRecord?.items || []) mergedItems.set(recordKey(item), item);
+  for (const item of currentRecordItems) mergedItems.set(recordKey(item), item);
+  const recordItems = [...mergedItems.values()].sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0));
+  const likedRecordTotal = recordItems.filter((item) => downloadRecordItemScope(item) === "liked").length;
+  const bookmarkedRecordTotal = recordItems.filter((item) => downloadRecordItemScope(item) === "bookmarked").length;
   return {
     schemaVersion: 3,
     generatedAt: new Date().toISOString(),
-    likedTotal: items.filter((item) => item.source === "liked" || item.source === "favorite_api").length,
-    bookmarkedTotal: items.filter((item) => item.source === "bookmarked").length,
-    eligibleTotal: eligibleItems.length,
-    downloadedTotal: eligibleItems.filter((item) => item.downloadStatus === "downloaded").length,
-    pendingTotal: eligibleItems.filter((item) => item.downloadStatus !== "downloaded").length,
-    failedTotal: eligibleItems.filter((item) => item.downloadStatus === "failed").length,
+    likedTotal: Math.max(items.filter((item) => item.source === "liked" || item.source === "favorite_api").length, likedRecordTotal),
+    bookmarkedTotal: Math.max(items.filter((item) => item.source === "bookmarked").length, bookmarkedRecordTotal),
+    eligibleTotal: recordItems.length,
+    downloadedTotal: recordItems.filter((item) => item.downloadStatus === "downloaded").length,
+    pendingTotal: recordItems.filter((item) => item.downloadStatus !== "downloaded").length,
+    failedTotal: recordItems.filter((item) => item.downloadStatus === "failed").length,
     current: {
       index: state.currentIndex,
       scope: state.scope || currentDownloadScope,
@@ -501,38 +757,7 @@ function buildDownloadRecord(items, state) {
       completed: state.completed,
       total: state.total,
     },
-    items: eligibleItems.map((item) => ({
-      awemeId: item.awemeId,
-      index: item.index,
-      source: item.source || "liked",
-      status: item.status,
-      downloadStatus: item.downloadStatus || "not_started",
-      mediaType: item.mediaType || "video",
-      mediaCount: Number(item.mediaCount || item.mediaParts?.length || 1),
-      downloadedPartCount: Number(item.downloadedPartCount || 0),
-      mediaPaths: Array.isArray(item.downloadMediaPaths) ? item.downloadMediaPaths : [],
-      imagePaths: Array.isArray(item.downloadImagePaths) ? item.downloadImagePaths : [],
-      downloadedMediaParts: item.downloadedMediaParts || {},
-      mediaParts: Array.isArray(item.mediaParts) ? item.mediaParts : [],
-      desc: item.desc || "",
-      authorUid: item.authorUid || "",
-      authorName: item.authorName || "",
-      createTime: item.createTime || 0,
-      resolution: item.downloadQualityLabel || "",
-      width: item.downloadWidth || 0,
-      height: item.downloadHeight || 0,
-      bitrate: item.downloadBitrate || 0,
-      codec: item.downloadCodec || "",
-      fps: item.downloadFps || 0,
-      size: item.downloadSize || 0,
-      candidateRank: item.downloadCandidateRank || 0,
-      qualityFallbackReason: item.downloadQualityFallbackReason || "",
-      videoPath: item.downloadVideoPath || "",
-      coverPath: item.downloadCoverPath || "",
-      url: item.url || "",
-      lastError: item.lastError || "",
-      updatedAt: item.updatedAt || "",
-    })),
+    items: recordItems,
   };
 }
 
@@ -605,18 +830,52 @@ async function persistDownloadArtifacts(target, batchState, {
     };
   }
   if (itemCompleted) artifactCheckpoint.itemsSinceFull += 1;
-  const [items, profileUid, profileNickname] = await Promise.all([
+  const progress = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    current: {
+      index: batchState.currentIndex,
+      scope: batchState.scope || currentDownloadScope,
+      awemeId: batchState.currentAwemeId,
+      resolution: batchState.currentResolution,
+      phase: batchState.phase,
+      completed: batchState.completed,
+      total: batchState.total,
+      inspected: batchState.inspected,
+      sessionCompleted: batchState.sessionCompleted || 0,
+    },
+  };
+  scheduleCompactWrite(target, getDownloadProgressPath(), JSON.stringify(progress));
+  if (itemCompleted) {
+    await updateLocalFolderCount(
+      target,
+      batchState.scope || currentDownloadScope,
+      batchState.completed,
+    );
+  }
+  const now = Date.now();
+  // The compact progress/count/index files are the download hot path. The
+  // legacy full state is only rebuilt at a safe pause or task completion.
+  const shouldWriteState = forceFull;
+  if (!shouldWriteState) {
+    recordStage("progress_checkpoint_write", timingNow() - startedAt, { ok: true, itemCompleted });
+    return { full: false, record: downloadRecordCache.record };
+  }
+  await flushCompactWrites(target);
+  const [items, profileUid, profileNickname, localCounts] = await Promise.all([
     getAll("items"),
     getConfig("likedSyncProfileUid", ""),
     getConfig("likedSyncProfileNickname", ""),
+    getLocalFolderCounts(target),
   ]);
-  const record = buildDownloadRecord(items, batchState);
+  const record = buildDownloadRecord(items, batchState, downloadRecordCache.record);
+  record.localCounts = localCounts;
   record.user = {
     uid: profileUid || "",
     nickname: profileNickname || "",
   };
   record.performance = currentPerformanceSummary();
-  await writeFile(target, getDownloadRecordPath(), `${JSON.stringify(record, null, 2)}\n`);
+  await writeFile(target, getDownloadRecordPath(), JSON.stringify(record));
   setCachedDownloadRecord(target, record);
   recordStage("checkpoint_write", timingNow() - startedAt, {
     ok: true,
@@ -624,33 +883,23 @@ async function persistDownloadArtifacts(target, batchState, {
     itemCompleted,
   });
 
-  const now = Date.now();
-  const shouldWriteFull = forceFull
-    || artifactCheckpoint.itemsSinceFull >= FULL_ARTIFACT_EVERY_ITEMS
-    || now - artifactCheckpoint.lastFullAt >= FULL_ARTIFACT_MAX_INTERVAL_MS;
-  if (!shouldWriteFull) return { full: false, record };
+  artifactCheckpoint.itemsSinceFull = 0;
+  artifactCheckpoint.lastFullAt = now;
+  if (!forceFull) return { full: false, record };
 
   const fullStartedAt = timingNow();
-  const logs = await getAll("logs");
-  const logReport = sanitizeDiagnostic({
-    generatedAt: new Date().toISOString(),
-    logs,
-  });
   const performance = currentPerformanceSummary();
   await Promise.all([
-    writeFile(target, getDownloadReportPath(), buildEnhancedDownloadReportHtml(record, target.label || "", logs)),
+    writeFile(target, getDownloadReportPath(), buildLocalLibraryHtml(record, target.label || "")),
     writeLocalDatabaseFiles(target, items, record),
-    writeFile(target, "data/.appdata/download-log.json", JSON.stringify(logReport, null, 2) + "\n"),
     performance
       ? writeFile(target, "data/.appdata/performance-summary.json", JSON.stringify(performance, null, 2) + "\n")
       : Promise.resolve(),
   ]);
-  artifactCheckpoint.itemsSinceFull = 0;
-  artifactCheckpoint.lastFullAt = now;
   recordStage("artifact_full_write", timingNow() - fullStartedAt, {
     ok: true,
     items: items.length,
-    logs: logs.length,
+    logs: 0,
   });
   return { full: true, record };
 }
@@ -742,9 +991,9 @@ async function writeLocalDatabaseFiles(target, items, record) {
   ].join("\n"));
 }
 
-async function recoverDownloadedItemsFromFolderRecord(target, defaultSource = "liked") {
+async function recoverDownloadedItemsFromFolderRecord(target, defaultSource = "liked", suppliedRecord = null) {
   if (target.kind !== "filesystem") return 0;
-  const record = await getCachedDownloadRecord(target, { force: true });
+  const record = suppliedRecord || await getCachedDownloadRecord(target);
   if (!record) return 0;
   const items = await getAll("items");
   const recovered = recoverDownloadedRecords(items, record.items, { defaultSource });
@@ -893,8 +1142,20 @@ function formatLogTime(value) {
   $("downloadTaskLog").scrollTop = 0;
 }
 
-function buildFollowingAuthors(items) {
+function buildFollowingAuthors(items, officialAuthors = []) {
   const grouped = new Map();
+  const officialUids = new Set((officialAuthors || []).map((author) => String(author?.uid || "")).filter(Boolean));
+  for (const author of officialAuthors || []) {
+    if (!author?.uid) continue;
+    grouped.set(String(author.uid), {
+      authorUid: String(author.uid),
+      secUid: String(author.secUid || ""),
+      authorName: author.nickname || "未命名作者",
+      total: Math.max(0, Number(author.awemeCount || 0)),
+      pending: Math.max(0, Number(author.awemeCount || 0)),
+      downloaded: 0,
+    });
+  }
   for (const item of items) {
     if (item.source !== "following" || !item.authorUid) continue;
     const key = String(item.authorUid);
@@ -905,9 +1166,10 @@ function buildFollowingAuthors(items) {
       pending: 0,
       downloaded: 0,
     };
-    entry.total += 1;
+    if (!officialUids.has(key)) entry.total += 1;
     if (item.downloadStatus === "downloaded") entry.downloaded += 1;
-    else entry.pending += 1;
+    else if (!officialUids.has(key)) entry.pending += 1;
+    if (officialUids.has(key)) entry.pending = Math.max(0, entry.total - entry.downloaded);
     if (!entry.authorName && item.authorName) entry.authorName = item.authorName;
     grouped.set(key, entry);
   }
@@ -920,8 +1182,8 @@ function renderFollowingAuthors(authors, selectedAuthorUids) {
     ? `已选 ${authors.filter((author) => selected.has(author.authorUid)).length} / ${authors.length}`
     : "未选择";
   $("followingSelectionMeta").textContent = authors.length
-    ? "勾选后，“下载关注列表视频”只会下载这些作者；如果一个都不选，则默认下载全部关注作者。"
-    : "当前还没有可供勾选的关注作者数据。";
+    ? "请选择要同步和下载的作者；未选择时不会启动，避免误下载全部关注作者。"
+    : "还没有作者数据，请点击“刷新”从抖音读取关注列表。";
   $("followingAuthorList").innerHTML = authors.map((author) => `
     <label class="selection-item">
       <input type="checkbox" class="following-author-checkbox" value="${escapeHtml(author.authorUid)}" ${selected.has(author.authorUid) ? "checked" : ""} />
@@ -950,32 +1212,369 @@ function escapeHtml(value) {
   }[char]));
 }
 
+function downloadRecordItemScope(item) {
+  const paths = [
+    item.videoPath,
+    item.coverPath,
+    ...(Array.isArray(item.mediaPaths) ? item.mediaPaths : []),
+    ...(Array.isArray(item.imagePaths) ? item.imagePaths : []),
+  ].filter(Boolean).join("/");
+  if (paths.includes("data/点赞/")) return "liked";
+  if (paths.includes("data/收藏/")) return "bookmarked";
+  if (paths.includes("data/关注/")) return "following";
+  if (item.source === "favorite_api") return "liked";
+  return item.source || "liked";
+}
+
+function summarizeLocalDownloads(recordItems, scope) {
+  const scoped = recordItems.filter((item) => downloadRecordItemScope(item) === scope);
+  const unique = new Map(scoped.map((item) => [String(item.awemeId || item.index || ""), item]));
+  const values = [...unique.values()];
+  return {
+    total: values.length,
+    downloaded: values.filter((item) => item.downloadStatus === "downloaded").length,
+    failed: values.filter((item) => item.downloadStatus === "failed").length,
+  };
+}
+
+async function getNestedDirectory(root, parts) {
+  let current = root;
+  for (const part of parts) current = await current.getDirectoryHandle(part, { create: false });
+  return current;
+}
+
+async function collectWorkIds(directory, { includeNestedVideo = false } = {}) {
+  const ids = new Set();
+  const incompleteIds = new Set();
+  try {
+    for await (const entry of directory.values()) {
+      if (entry.kind === "directory") {
+        if (includeNestedVideo && entry.name === "视频") {
+          const nested = await collectWorkIds(entry);
+          for (const id of nested) ids.add(id);
+        } else {
+          ids.add(entry.name);
+        }
+        continue;
+      }
+      if (entry.name.endsWith(".resume.json")) {
+        incompleteIds.add(entry.name.replace(/\.resume\.json$/i, "").replace(/\.[^.]+$/, "").replace(/-\d+$/, ""));
+        continue;
+      }
+      if (!/\.(mp4|jpe?g|png|webp)$/i.test(entry.name)) continue;
+      ids.add(entry.name.replace(/\.[^.]+$/, "").replace(/-\d+$/, ""));
+    }
+  } catch {}
+  for (const id of incompleteIds) ids.delete(id);
+  return ids;
+}
+
+async function getScopeWorkIds(root, scope) {
+  const base = scope === "liked"
+    ? ["data", "点赞"]
+    : (scope === "bookmarked" ? ["data", "收藏"] : ["data", "关注"]);
+  const ids = new Set();
+  for (const leaf of ["视频", "图片"]) {
+    try {
+      const directory = await getNestedDirectory(root, [...base, leaf]);
+      const found = await collectWorkIds(directory, { includeNestedVideo: scope === "following" });
+      for (const id of found) ids.add(id);
+    } catch {}
+  }
+  return ids;
+}
+
+async function countScopeFiles(root, scope) {
+  return (await getScopeWorkIds(root, scope)).size;
+}
+
+async function writeDownloadIndex(target, index, { delayed = false } = {}) {
+  const content = JSON.stringify(serializeDownloadIndex(index));
+  if (delayed) scheduleCompactWrite(target, getDownloadIndexPath(), content);
+  else await writeFile(target, getDownloadIndexPath(), content);
+  downloadIndexCache = { targetKey: getTargetCacheKey(target), index, loadingPromise: null };
+}
+
+async function getDownloadIndex(target) {
+  if (target?.kind !== "filesystem") return createDownloadIndex();
+  const targetKey = getTargetCacheKey(target);
+  if (downloadIndexCache.targetKey === targetKey && downloadIndexCache.index) return downloadIndexCache.index;
+  if (downloadIndexCache.targetKey === targetKey && downloadIndexCache.loadingPromise) {
+    return await downloadIndexCache.loadingPromise;
+  }
+  const loadingPromise = (async () => {
+    try {
+      const text = await readTextFile(target, getDownloadIndexPath());
+      const raw = text ? JSON.parse(text) : null;
+      if (raw?.schemaVersion === 1) return createDownloadIndex(raw);
+    } catch {}
+    const [liked, bookmarked, following, uid, nickname] = await Promise.all([
+      getScopeWorkIds(target.handle, "liked"),
+      getScopeWorkIds(target.handle, "bookmarked"),
+      getScopeWorkIds(target.handle, "following"),
+      getConfig("likedSyncProfileUid", ""),
+      getConfig("likedSyncProfileNickname", ""),
+    ]);
+    const hasExistingMedia = liked.size + bookmarked.size + following.size > 0;
+    const migrated = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      user: hasExistingMedia ? { uid: uid || "", nickname: nickname || "" } : { uid: "", nickname: "" },
+      scopes: { liked, bookmarked, following },
+    };
+    await writeDownloadIndex(target, migrated);
+    return migrated;
+  })();
+  downloadIndexCache = { targetKey, index: null, loadingPromise };
+  try {
+    const index = await loadingPromise;
+    downloadIndexCache = { targetKey, index, loadingPromise: null };
+    return index;
+  } catch (error) {
+    downloadIndexCache = { targetKey, index: null, loadingPromise: null };
+    throw error;
+  }
+}
+
+async function markDownloadIndexCompleted(target, scope, awemeId) {
+  if (target?.kind !== "filesystem" || !awemeId) return;
+  const index = await getDownloadIndex(target);
+  if (!markIndexCompleted(index, scope, awemeId)) return;
+  await writeDownloadIndex(target, index, { delayed: true });
+}
+
+async function reconcilePageItemsWithFolderIds(items, folderIds) {
+  const patched = [];
+  const reconciled = items.map((item) => {
+    const exists = folderIds?.has(String(item.awemeId || ""));
+    if (exists && item.downloadStatus === "downloaded") return item;
+    if (!exists && item.downloadStatus !== "downloaded") return item;
+    const next = patchItem(item, {
+      downloadStatus: exists ? "downloaded" : "not_started",
+      lastError: "",
+    });
+    patched.push(next);
+    return next;
+  });
+  if (patched.length) await putItems(patched);
+  return reconciled;
+}
+
+async function getLocalFolderCounts(target) {
+  if (target?.kind !== "filesystem" || !target.handle) return { liked: 0, bookmarked: 0, following: 0, likedCurrent: 0, likedArchived: 0, likedReconciledAt: "" };
+  const targetKey = getTargetCacheKey(target);
+  if (
+    localFolderCountCache.targetKey === targetKey
+    && localFolderCountCache.counts
+    && Date.now() - localFolderCountCache.loadedAt < 5 * 60 * 1000
+  ) return localFolderCountCache.counts;
+  if (localFolderCountCache.targetKey === targetKey && localFolderCountCache.loadingPromise) {
+    return await localFolderCountCache.loadingPromise;
+  }
+  const loadingPromise = (async () => {
+    try {
+      const text = await readTextFile(target, getDownloadCountsPath());
+      const saved = text ? JSON.parse(text) : null;
+      if (saved?.schemaVersion === 1 && saved.counts) {
+        return {
+          liked: Math.max(0, Number(saved.counts.liked || 0)),
+          bookmarked: Math.max(0, Number(saved.counts.bookmarked || 0)),
+          following: Math.max(0, Number(saved.counts.following || 0)),
+          likedCurrent: Math.max(0, Number(saved.counts.likedCurrent || 0)),
+          likedArchived: Math.max(0, Number(saved.counts.likedArchived || 0)),
+          likedReconciledAt: String(saved.counts.likedReconciledAt || ""),
+        };
+      }
+    } catch {}
+    const [liked, bookmarked, following] = await Promise.all([
+      countScopeFiles(target.handle, "liked"),
+      countScopeFiles(target.handle, "bookmarked"),
+      countScopeFiles(target.handle, "following"),
+    ]);
+    const counts = { liked, bookmarked, following, likedCurrent: 0, likedArchived: 0, likedReconciledAt: "" };
+    await writeFile(target, getDownloadCountsPath(), JSON.stringify({
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      counts,
+    })).catch(() => {});
+    return counts;
+  })();
+  localFolderCountCache = { targetKey, loadedAt: 0, counts: null, loadingPromise };
+  try {
+    const counts = await loadingPromise;
+    localFolderCountCache = { targetKey, loadedAt: Date.now(), counts, loadingPromise: null };
+    return counts;
+  } catch (error) {
+    localFolderCountCache = { targetKey, loadedAt: 0, counts: null, loadingPromise: null };
+    throw error;
+  }
+}
+
+async function saveLocalFolderCounts(target, counts, { delayed = true } = {}) {
+  const next = {
+    liked: Math.max(0, Number(counts?.liked || 0)),
+    bookmarked: Math.max(0, Number(counts?.bookmarked || 0)),
+    following: Math.max(0, Number(counts?.following || 0)),
+    likedCurrent: Math.max(0, Number(counts?.likedCurrent || 0)),
+    likedArchived: Math.max(0, Number(counts?.likedArchived || 0)),
+    likedReconciledAt: String(counts?.likedReconciledAt || ""),
+  };
+  localFolderCountCache = {
+    targetKey: getTargetCacheKey(target),
+    loadedAt: Date.now(),
+    counts: next,
+    loadingPromise: null,
+  };
+  const content = JSON.stringify({
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    counts: next,
+  });
+  if (delayed) scheduleCompactWrite(target, getDownloadCountsPath(), content);
+  else await writeFile(target, getDownloadCountsPath(), content);
+  return next;
+}
+
+async function updateLocalFolderCount(target, scope, completed) {
+  if (target?.kind !== "filesystem" || !["liked", "bookmarked", "following"].includes(scope)) return;
+  const counts = await getLocalFolderCounts(target);
+  const next = {
+    ...counts,
+    [scope]: Math.max(Number(counts[scope] || 0), Number(completed || 0)),
+  };
+  await saveLocalFolderCounts(target, next);
+}
+
+async function bindFolderToCurrentAccount(target, index) {
+  const profileResult = await requestSelfProfile({ maxAgeMs: 5 * 60 * 1000, reason: "folder_account_binding" });
+  if (!profileResult?.ok) {
+    throw new Error(`无法确认当前抖音账号：${resultError(profileResult)}`);
+  }
+  const user = profileUser(profileResult) || {};
+  const currentUserId = String(user.uid || user.id || user.sec_uid || user.secUid || user.sec_user_id || "");
+  const nickname = String(user.nickname || user.name || "");
+  if (!currentUserId) throw new Error("当前抖音账号缺少用户标识，已停止写入下载文件夹");
+  const folderUserId = String(index?.user?.uid || "");
+  if (folderUserId && folderUserId !== currentUserId) {
+    throw new Error(
+      `该文件夹已绑定另一个抖音账号${index?.user?.nickname ? `：${index.user.nickname}` : ""}，请更换文件夹`,
+    );
+  }
+  if (!folderUserId || String(index?.user?.nickname || "") !== nickname) {
+    index.user = { uid: currentUserId, nickname };
+    await writeDownloadIndex(target, index);
+  }
+  return index;
+}
+
+async function ensureDailyLightweightBackup(target, index, batchState = downloadBatchState) {
+  if (target?.kind !== "filesystem") return false;
+  const date = localDateKey();
+  const path = `data/.appdata/backups/${date}/download-metadata.json`;
+  try {
+    if (await readTextFile(target, path)) return false;
+  } catch {}
+  const counts = await getLocalFolderCounts(target);
+  const backup = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    date,
+    user: index?.user || { uid: "", nickname: "" },
+    counts,
+    index: serializeDownloadIndex(index),
+    current: {
+      scope: batchState.scope || currentDownloadScope,
+      completed: Number(batchState.completed || 0),
+      total: Number(batchState.total || 0),
+      phase: String(batchState.phase || ""),
+    },
+  };
+  await writeFile(target, path, JSON.stringify(backup));
+  return true;
+}
+
 async function renderContent() {
-  const state = await summarize();
-  const items = await getAll("items");
-  const followingAuthors = buildFollowingAuthors(items);
+  const includeLibrary = currentView === "favorite"
+    || (!downloadRunning && Boolean($("followingOptionsPanel").open));
+  const items = includeLibrary ? await getAll("items") : [];
+  const state = includeLibrary
+    ? await summarize({ items })
+    : {
+      config: await loadConfig(),
+      logs: [],
+      total: 0,
+      favorite: { completed: 0, pending: 0, paused: 0, auditPending: 0, cursor: null },
+    };
+  const officialFollowingAuthors = await getCachedFollowingAuthors();
+  const followingAuthors = buildFollowingAuthors(items, officialFollowingAuthors);
   const selectedFollowingAuthors = await getSelectedFollowingAuthors();
   const storedTarget = await getStoredDownloadTarget();
+  const folderCounts = storedTarget?.permission === "granted"
+    ? await getLocalFolderCounts(storedTarget).catch((error) => {
+      console.warn("读取本地下载数量失败", error);
+      return { liked: 0, bookmarked: 0, following: 0 };
+    })
+    : { liked: 0, bookmarked: 0, following: 0 };
+  const folderProgress = storedTarget?.permission === "granted"
+    ? await readDownloadProgressRecord(storedTarget)
+    : null;
   const folderRecord = storedTarget?.permission === "granted"
-    ? await getCachedDownloadRecord(storedTarget)
+    ? {
+      current: folderProgress?.current || null,
+      items: [],
+      eligibleTotal: folderCounts.liked + folderCounts.bookmarked + folderCounts.following,
+      downloadedTotal: folderCounts.liked + folderCounts.bookmarked + folderCounts.following,
+      pendingTotal: 0,
+      failedTotal: 0,
+    }
     : null;
   if (!configHydrated && !document.activeElement?.matches("input")) {
     fillConfig(state.config);
     configHydrated = true;
   }
   const recordCurrent = folderRecord?.current || null;
+  const recordScope = recordCurrent?.scope || "liked";
+  const folderCompletedForCurrentScope = Number(folderCounts[recordScope] || 0);
+  const historicalCompleted = Math.max(Number(recordCurrent?.completed || 0), folderCompletedForCurrentScope);
   const recordItems = Array.isArray(folderRecord?.items) ? folderRecord.items : [];
+  const likedLocal = summarizeLocalDownloads(recordItems, "liked");
+  const bookmarkedLocal = summarizeLocalDownloads(recordItems, "bookmarked");
+  const followingLocal = summarizeLocalDownloads(recordItems, "following");
+  likedLocal.downloaded = Math.max(likedLocal.downloaded, folderCounts.liked);
+  bookmarkedLocal.downloaded = Math.max(bookmarkedLocal.downloaded, folderCounts.bookmarked);
+  followingLocal.downloaded = Math.max(followingLocal.downloaded, folderCounts.following);
+  followingLocal.total = Math.max(followingLocal.total, folderCounts.following);
   const recordCursorItem = [...recordItems]
     .filter((item) => item.downloadStatus && item.downloadStatus !== "not_started")
     .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0] || null;
   $("likedSummaryCount").textContent = remoteProfileSummary.likedTotal ?? "-";
   $("bookmarkedSummaryCount").textContent = remoteProfileSummary.bookmarkedTotal ?? "-";
+  const hasReadableFolder = storedTarget?.permission === "granted";
+  $("likedLocalDownloadedCount").textContent = hasReadableFolder ? String(likedLocal.downloaded) : "-";
+  $("likedArchivedLocalCount").textContent = hasReadableFolder ? String(folderCounts.likedArchived || 0) : "-";
+  $("likedArchivedLocalCount").title = folderCounts.likedReconciledAt
+    ? `最近完整核对：${new Date(folderCounts.likedReconciledAt).toLocaleString("zh-CN")}`
+    : "完成一次完整喜欢列表扫描后统计";
+  $("bookmarkedLocalDownloadedCount").textContent = hasReadableFolder ? String(bookmarkedLocal.downloaded) : "-";
+  $("followingLocalDownloadedCount").textContent = hasReadableFolder ? String(followingLocal.downloaded) : "-";
+  $("followingSummaryCount").textContent = String(followingLocal.total);
+  const likedCurrentLocal = folderCounts.likedReconciledAt
+    ? Math.max(0, Number(folderCounts.likedCurrent || 0))
+    : likedLocal.downloaded;
+  $("likedLocalPendingCount").textContent = !hasReadableFolder || remoteProfileSummary.likedTotal == null
+    ? "-"
+    : String(Math.max(0, remoteProfileSummary.likedTotal - likedCurrentLocal));
+  $("bookmarkedLocalPendingCount").textContent = !hasReadableFolder || remoteProfileSummary.bookmarkedTotal == null
+    ? "-"
+    : String(Math.max(0, remoteProfileSummary.bookmarkedTotal - bookmarkedLocal.downloaded));
+  $("followingLocalPendingCount").textContent = hasReadableFolder
+    ? String(Math.max(0, followingLocal.total - followingLocal.downloaded))
+    : "-";
   $("remoteSummaryMeta").textContent = remoteProfileSummary.status === "loaded"
-    ? "Official counts in " + Math.round(remoteProfileSummary.durationMs) + "ms"
-      + (remoteProfileSummary.nickname ? " | " + remoteProfileSummary.nickname : "")
+    ? "已连接" + (remoteProfileSummary.nickname ? " · " + remoteProfileSummary.nickname : "")
     : (remoteProfileSummary.status === "loading"
-      ? "Loading official counts..."
-      : (remoteProfileSummary.error || "Official counts not loaded"));
+      ? "正在读取平台数量…"
+      : (remoteProfileSummary.error || "暂未读取平台数量"));
   const performanceText = formatPerformanceSummary(currentPerformanceSummary())
     || "Performance timing starts with the next download task";
   $("performanceSummary").textContent = performanceText;
@@ -998,14 +1597,22 @@ async function renderContent() {
   $("downloadSummaryResolution").textContent = downloadBatchState.currentResolution
     || recordCursorItem?.resolution
     || "-";
+  updateDownloadBatchProgress();
   $("downloadTaskCursor").textContent = downloadBatchState.currentOrder
     ? `${downloadBatchState.currentOrder} / ${downloadBatchState.total || "-"}`
     : (recordCursorItem?.index != null ? `#${recordCursorItem.index}` : "-");
   $("downloadTaskChecked").textContent = downloadBatchState.inspected
     ? `${downloadBatchState.inspected} / ${downloadBatchState.total || "-"}`
-    : "-";
-  $("downloadTaskTotal").textContent = downloadBatchState.total ? String(downloadBatchState.total) : String(folderRecord?.eligibleTotal ?? 0);
-  $("downloadTaskCompleted").textContent = String(downloadBatchState.completed || 0);
+    : (recordCurrent?.inspected ? String(recordCurrent.inspected) : "-");
+  $("downloadTaskTotal").textContent = downloadBatchState.total
+    ? String(downloadBatchState.total)
+    : String(Math.max(Number(recordCurrent?.total || folderRecord?.eligibleTotal || 0), historicalCompleted));
+  $("downloadTaskCompleted").textContent = String(
+    downloadBatchState.total ? downloadBatchState.completed : historicalCompleted,
+  );
+  if (!downloadBatchState.total && recordCurrent?.total) {
+    $("downloadTaskProgress").textContent = `上次进度：${historicalCompleted} / ${Math.max(Number(recordCurrent.total || 0), historicalCompleted)}`;
+  }
   $("downloadTaskResolution").textContent = downloadBatchState.currentResolution || recordCursorItem?.resolution || "-";
   $("favoriteCursorBox").innerHTML = state.favorite.cursor
     ? [
@@ -1026,18 +1633,13 @@ async function renderContent() {
     ].filter(Boolean).join("<br>")
     : (storedTarget?.permission === "granted" ? "当前文件夹还没有下载记录" : "尚无数据");
   $("downloadTargetMeta").innerHTML = storedTarget?.permission === "granted"
-    ? [
-      `已记住文件夹：${escapeHtml(storedTarget.label || "已授权文件夹")}`,
-      `授权时间：${escapeHtml((storedTarget.selectedAt || "").replace("T", " ").slice(0, 19) || "未知")}`,
-      folderRecord ? "检测到该文件夹已有下载记录，后续会按记录继续。" : "该文件夹还没有下载记录文件，开始下载时会从 0 建立记录。",
-      `当前勾选该选项时，下载会直接写入这个文件夹，不会出现在浏览器下载记录里。`,
-    ].join("<br>")
-    : "当前未记住可用文件夹；先点击“选择文件夹”授权目录，否则无法以无浏览器下载记录的方式开始下载。";
+    ? `<strong>${escapeHtml(storedTarget.label || "已授权文件夹")}</strong> · 已就绪，将按本地索引继续`
+    : "未选择目录，开始下载前需要先授权";
   $("downloadTaskTargetMeta").innerHTML = $("downloadTargetMeta").innerHTML;
   $("downloadTaskCursorBox").innerHTML = $("downloadCursorBox").innerHTML;
-  renderDownloadTaskHeader(currentDownloadScope);
+  $("downloadTaskView").classList.toggle("hidden", !downloadRunning && !downloadBatchState.total && !recordCurrent?.total);
+  renderDownloadTaskHeader(downloadBatchState.total ? currentDownloadScope : (recordCurrent?.scope || currentDownloadScope));
   renderFollowingAuthors(followingAuthors, selectedFollowingAuthors);
-  updateDownloadBatchProgress();
   renderLogs(state.logs);
   updateButtons();
 }
@@ -1050,12 +1652,13 @@ async function saveCurrentConfig() {
 }
 
 function updateButtons() {
-  $("favoriteBtn").disabled = running;
-  $("auditBtn").disabled = running;
-  $("downloadBtn").disabled = downloadRunning;
-  $("downloadBookmarkedBtn").disabled = downloadRunning;
-  $("continueDownloadBtn").disabled = downloadRunning;
-  $("downloadFollowingBtn").disabled = downloadRunning;
+  $("favoriteBtn").disabled = running || oneClickRunning;
+  $("auditBtn").disabled = running || oneClickRunning;
+  $("downloadBtn").disabled = downloadRunning || oneClickRunning;
+  $("downloadBookmarkedBtn").disabled = downloadRunning || oneClickRunning;
+  $("continueDownloadBtn").disabled = downloadRunning || oneClickRunning;
+  $("downloadFollowingBtn").disabled = downloadRunning || oneClickRunning;
+  $("oneClickBackupBtn").disabled = downloadRunning || running || oneClickRunning;
   $("pauseDownloadBtn").disabled = !downloadRunning;
   $("pauseDownloadTaskBtn").disabled = !downloadRunning;
   $("stopBtn").disabled = !running;
@@ -1072,7 +1675,11 @@ function randomDelay(config) {
 }
 
 function resultError(result) {
-  return result?.statusMsg || result?.text || result?.error || `HTTP ${result?.httpStatus || "unknown"}`;
+  return result?.statusMsg
+    || result?.text
+    || result?.error
+    || (result?.statusCode != null ? `抖音业务状态码 ${result.statusCode}（HTTP ${result?.httpStatus || "unknown"}）` : "")
+    || `HTTP ${result?.httpStatus || "unknown"}`;
 }
 
 function isRateLimited(result) {
@@ -1211,7 +1818,7 @@ async function runFavoriteBatch() {
       const result = await processFavoriteItem(item);
       completed += result.ok ? 1 : 0;
       newlyFavorited += result.auditedCandidate ? 1 : 0;
-      await render();
+      scheduleRender();
       if (result.pause) {
         setGlobalStatus("收藏暂停");
         setFavoriteStatus("已暂停");
@@ -1424,7 +2031,7 @@ async function syncNextLikedPage(config) {
 let lastLikedPageRequestAt = 0;
 
 async function startLikedScan() {
-  const profileResult = await requestSelfProfile({ maxAgeMs: 10000, reason: "liked_scan" });
+  const profileResult = await requestSelfProfile({ maxAgeMs: 5 * 60 * 1000, reason: "liked_scan" });
   if (!profileResult?.ok) {
     throw new Error("\u559c\u6b22\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u65e0\u6cd5\u8bfb\u53d6\u5f53\u524d\u767b\u5f55\u7528\u6237\uff0c" + resultError(profileResult));
   }
@@ -1558,7 +2165,7 @@ async function scanNextLikedPage(scanState) {
 let lastBookmarkedPageRequestAt = 0;
 
 async function startBookmarkedScan() {
-  const profileResult = await requestSelfProfile({ maxAgeMs: 10000, reason: "bookmarked_scan" });
+  const profileResult = await requestSelfProfile({ maxAgeMs: 5 * 60 * 1000, reason: "bookmarked_scan" });
   if (!profileResult?.ok) {
     throw new Error("\u6536\u85cf\u5217\u8868\u540c\u6b65\u5931\u8d25\uff1a\u65e0\u6cd5\u8bfb\u53d6\u5f53\u524d\u767b\u5f55\u7528\u6237\uff0c" + resultError(profileResult));
   }
@@ -2389,7 +2996,7 @@ async function downloadOne(item, rootHandle, config) {
   });
 }
 
-async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord = null) {
+async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord = null, preparationStartedAt = timingNow()) {
   if (rootHandle.kind === "downloads") {
     const uiResult = await sendRuntimeMessage({ type: "SET_DOWNLOAD_UI", enabled: false });
     if (!uiResult?.ok) {
@@ -2407,7 +3014,12 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
         + "\uff0c\u5df2\u505c\u6b62\u5199\u5165\uff1b\u8bf7\u4e3a\u5f53\u524d\u8d26\u53f7\u9009\u62e9\u65b0\u6587\u4ef6\u5939",
     );
   }
-  const recoveredFromFolder = await recoverDownloadedItemsFromFolderRecord(rootHandle, "liked");
+  if (!folderUserId && currentUserId) {
+    const index = await getDownloadIndex(rootHandle);
+    index.user = { uid: currentUserId, nickname: scanState.nickname || "" };
+    await writeDownloadIndex(rootHandle, index);
+  }
+  const recoveredFromFolder = await recoverDownloadedItemsFromFolderRecord(rootHandle, "liked", folderRecord);
   if (recoveredFromFolder) {
     logLine(
       "\u5df2\u4ece\u6587\u4ef6\u5939\u8bb0\u5f55\u6062\u590d " + recoveredFromFolder + " \u6761\u5df2\u4e0b\u8f7d\u8bb0\u5f55",
@@ -2418,8 +3030,27 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
     );
   }
 
-  downloadBatchState.total = scanState.expectedTotal;
-  downloadBatchState.completed = 0;
+  const downloadIndex = await getDownloadIndex(rootHandle);
+  const likedFolderIds = downloadIndex.scopes.liked;
+  const previouslyDownloaded = Math.max(
+    await countDownloadedInScope("liked"),
+    likedFolderIds.size,
+  );
+  const previousFullScanCount = Math.max(0, Number(await getConfig("likedSyncCompletedCount", 0)) || 0);
+  const previousFullScanAt = String(await getConfig("likedSyncCompletedAt", "") || "");
+  const canStopAtKnownBoundary = Boolean(
+    previousFullScanAt
+      && previousFullScanCount > 0
+      && likedFolderIds.size >= previousFullScanCount,
+  );
+  logLine(`准备检查完成，耗时 ${((timingNow() - preparationStartedAt) / 1000).toFixed(1)} 秒，开始读取喜欢列表`, {
+    type: "download_preparation_finished",
+    scope: "liked",
+    durationMs: timingNow() - preparationStartedAt,
+  });
+  downloadBatchState.total = Math.max(scanState.expectedTotal, previouslyDownloaded);
+  downloadBatchState.completed = previouslyDownloaded;
+  downloadBatchState.sessionCompleted = 0;
   downloadBatchState.inspected = 0;
   downloadBatchState.phase = "\u68c0\u67e5\u559c\u6b22\u5217\u8868";
   setDownloadStatus("\u68c0\u67e5\u4e2d");
@@ -2441,14 +3072,15 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
   let attempted = 0;
   let pendingFound = 0;
   let consecutiveFailures = 0;
+  let stoppedAtKnownBoundary = false;
   while (!scanState.finished && !downloadPauseRequested) {
-    downloadBatchState.phase = "\u68c0\u67e5\u559c\u6b22\u5217\u8868";
-    setDownloadStatus("\u68c0\u67e5\u4e2d");
+    downloadBatchState.phase = stoppedAtKnownBoundary ? "核对消失留存" : "\u68c0\u67e5\u559c\u6b22\u5217\u8868";
+    setDownloadStatus(stoppedAtKnownBoundary ? "核对留存" : "\u68c0\u67e5\u4e2d");
     updateDownloadBatchProgress();
     const pageResult = await scanNextLikedPage(scanState);
     scanState = pageResult.state;
     downloadBatchState.inspected = scanState.checked;
-    downloadBatchState.total = Math.max(scanState.expectedTotal, scanState.checked);
+    downloadBatchState.total = Math.max(downloadBatchState.completed, scanState.expectedTotal, scanState.checked);
     updateDownloadBatchProgress();
 
     if (scanState.finished && !scanState.fullScan) {
@@ -2464,9 +3096,15 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
       );
     }
 
-    const runnableItems = pageResult.items
+    const reconciledPageItems = await reconcilePageItemsWithFolderIds(pageResult.items, likedFolderIds);
+    const runnableItems = reconciledPageItems
       .filter((item) => scopeDef.isEligible(item))
       .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0));
+    const reachedKnownBoundary = !stoppedAtKnownBoundary
+      && canStopAtKnownBoundary
+      && pageResult.items.length > 0
+      && pageResult.items.every((item) => likedFolderIds.has(String(item.awemeId || "")))
+      && runnableItems.length === 0;
     pendingFound += runnableItems.length;
     for (const item of runnableItems) {
       if (downloadPauseRequested) break;
@@ -2479,9 +3117,11 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
       updateDownloadBatchProgress();
       try {
         await downloadOne(item, rootHandle, config);
+        await markDownloadIndexCompleted(rootHandle, "liked", item.awemeId);
         downloaded += 1;
         consecutiveFailures = 0;
-        downloadBatchState.completed = downloaded;
+        downloadBatchState.sessionCompleted = downloaded;
+        downloadBatchState.completed = Math.min(downloadBatchState.total, previouslyDownloaded + downloaded);
       } catch (error) {
         if (isDownloadPausedError(error)) break;
         failed += 1;
@@ -2504,11 +3144,27 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
       }
       await persistDownloadArtifacts(rootHandle, downloadBatchState, { itemCompleted: true });
       updateDownloadBatchProgress();
-      await render();
+      scheduleRender();
       if (consecutiveFailures >= 8) {
         throw new Error("\u8fde\u7eed 8 \u4e2a\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\uff0c\u5df2\u505c\u6b62\u4ee5\u907f\u514d\u7ee7\u7eed\u89e6\u53d1\u9650\u5236");
       }
       await waitTracked("item_delay", randomDelay(config), { scope: "liked" });
+    }
+    if (reachedKnownBoundary && !downloadPauseRequested) {
+      stoppedAtKnownBoundary = true;
+      downloadBatchState.phase = "新作品检查完成 · 正在核对消失留存";
+      setDownloadStatus("核对留存");
+      updateDownloadBatchProgress();
+      logLine(
+        `已遇到连续 ${pageResult.items.length} 条本地已下载作品；新作品检查完成，继续完整核对已从喜欢列表消失的本地留存`,
+        {
+          type: "liked_incremental_boundary_reached",
+          checked: scanState.checked,
+          page: scanState.page,
+          boundaryItems: pageResult.items.length,
+          expectedTotal: scanState.expectedTotal,
+        },
+      );
     }
   }
 
@@ -2528,14 +3184,41 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
     return;
   }
 
+  let likedArchivedLocal = null;
+  if (scanState.fullScan) {
+    const { currentLocal, archivedLocal } = reconcileLikedLocalIds(likedFolderIds, scanState.seenIds);
+    const counts = await getLocalFolderCounts(rootHandle);
+    await saveLocalFolderCounts(rootHandle, {
+      ...counts,
+      liked: likedFolderIds.size,
+      likedCurrent: currentLocal,
+      likedArchived: archivedLocal,
+      likedReconciledAt: new Date().toISOString(),
+    });
+    likedArchivedLocal = archivedLocal;
+    logLine(
+      `喜欢完整核对完成：抖音当前可读取 ${scanState.seenIds.size} 条，本地累计 ${likedFolderIds.size} 条，已从喜欢列表消失但本地仍保留 ${archivedLocal} 条`,
+      {
+        type: "liked_local_reconciliation_finished",
+        remoteProfileTotal: scanState.expectedTotal,
+        currentReadable: scanState.seenIds.size,
+        localTotal: likedFolderIds.size,
+        currentLocal,
+        archivedLocal,
+      },
+    );
+  }
+
   const allItems = await getAll("items");
   const likedItems = allItems.filter((item) => ["liked", "favorite_api"].includes(item.source));
   const alreadyDownloaded = likedItems.filter((item) => item.downloadStatus === "downloaded").length;
   downloadBatchState.phase = "\u5df2\u5b8c\u6210";
-  await Promise.all([
-    setConfig("likedSyncCompletedAt", new Date().toISOString()),
-    setConfig("likedSyncCompletedCount", scanState.checked),
-  ]);
+  if (scanState.fullScan) {
+    await Promise.all([
+      setConfig("likedSyncCompletedAt", new Date().toISOString()),
+      setConfig("likedSyncCompletedCount", scanState.checked),
+    ]);
+  }
   await persistDownloadArtifacts(rootHandle, downloadBatchState, { forceFull: true });
   if (!pendingFound) {
     logLine(
@@ -2561,12 +3244,14 @@ async function runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord =
       alreadyDownloaded,
       expectedTotal: scanState.expectedTotal,
       pages: scanState.page,
+      incrementalBoundary: stoppedAtKnownBoundary,
+      likedArchivedLocal,
     },
   );
 }
 
 
-async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRecord = null) {
+async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRecord = null, preparationStartedAt = timingNow()) {
   let scanState = await startBookmarkedScan();
   const currentUserId = String(scanState.uid || scanState.secUid || "");
   const folderUserId = String(folderRecord?.user?.uid || "");
@@ -2577,7 +3262,12 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
         + "\uff0c\u5df2\u505c\u6b62\u5199\u5165\uff1b\u8bf7\u4e3a\u5f53\u524d\u8d26\u53f7\u9009\u62e9\u65b0\u6587\u4ef6\u5939",
     );
   }
-  const recoveredFromFolder = await recoverDownloadedItemsFromFolderRecord(rootHandle, "bookmarked");
+  if (!folderUserId && currentUserId) {
+    const index = await getDownloadIndex(rootHandle);
+    index.user = { uid: currentUserId, nickname: scanState.nickname || "" };
+    await writeDownloadIndex(rootHandle, index);
+  }
+  const recoveredFromFolder = await recoverDownloadedItemsFromFolderRecord(rootHandle, "bookmarked", folderRecord);
   if (recoveredFromFolder) {
     logLine(
       "\u5df2\u4ece\u6587\u4ef6\u5939\u8bb0\u5f55\u6062\u590d " + recoveredFromFolder + " \u6761\u6536\u85cf\u89c6\u9891\u5df2\u4e0b\u8f7d\u8bb0\u5f55",
@@ -2589,8 +3279,20 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
     );
   }
 
-  downloadBatchState.total = scanState.expectedTotal;
-  downloadBatchState.completed = 0;
+  const downloadIndex = await getDownloadIndex(rootHandle);
+  const bookmarkedFolderIds = downloadIndex.scopes.bookmarked;
+  const previouslyDownloaded = Math.max(
+    await countDownloadedInScope("bookmarked"),
+    bookmarkedFolderIds.size,
+  );
+  logLine(`准备检查完成，耗时 ${((timingNow() - preparationStartedAt) / 1000).toFixed(1)} 秒，开始读取收藏列表`, {
+    type: "download_preparation_finished",
+    scope: "bookmarked",
+    durationMs: timingNow() - preparationStartedAt,
+  });
+  downloadBatchState.total = Math.max(scanState.expectedTotal, previouslyDownloaded);
+  downloadBatchState.completed = previouslyDownloaded;
+  downloadBatchState.sessionCompleted = 0;
   downloadBatchState.inspected = 0;
   downloadBatchState.phase = "\u68c0\u67e5\u6536\u85cf\u5217\u8868";
   setDownloadStatus("\u68c0\u67e5\u4e2d");
@@ -2619,7 +3321,7 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
     const pageResult = await scanNextBookmarkedPage(scanState);
     scanState = pageResult.state;
     downloadBatchState.inspected = scanState.checked;
-    downloadBatchState.total = Math.max(scanState.expectedTotal, scanState.checked);
+    downloadBatchState.total = Math.max(downloadBatchState.completed, scanState.expectedTotal, scanState.checked);
     updateDownloadBatchProgress();
 
     if (scanState.finished && !scanState.fullScan) {
@@ -2635,7 +3337,8 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
       );
     }
 
-    const runnableItems = pageResult.items
+    const reconciledPageItems = await reconcilePageItemsWithFolderIds(pageResult.items, bookmarkedFolderIds);
+    const runnableItems = reconciledPageItems
       .filter((item) => scopeDef.isEligible(item))
       .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0));
     pendingFound += runnableItems.length;
@@ -2650,9 +3353,11 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
       updateDownloadBatchProgress();
       try {
         await downloadOne(item, rootHandle, config);
+        await markDownloadIndexCompleted(rootHandle, "bookmarked", item.awemeId);
         downloaded += 1;
         consecutiveFailures = 0;
-        downloadBatchState.completed = downloaded;
+        downloadBatchState.sessionCompleted = downloaded;
+        downloadBatchState.completed = Math.min(downloadBatchState.total, previouslyDownloaded + downloaded);
       } catch (error) {
         if (isDownloadPausedError(error)) break;
         failed += 1;
@@ -2675,7 +3380,7 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
       }
       await persistDownloadArtifacts(rootHandle, downloadBatchState, { itemCompleted: true });
       updateDownloadBatchProgress();
-      await render();
+      scheduleRender();
       if (consecutiveFailures >= 8) {
         throw new Error("\u8fde\u7eed 8 \u4e2a\u6536\u85cf\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\uff0c\u5df2\u505c\u6b62\u4ee5\u907f\u514d\u7ee7\u7eed\u89e6\u53d1\u9650\u5236");
       }
@@ -2736,6 +3441,177 @@ async function runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRec
   );
 }
 
+async function syncFollowingAuthorWorks(authors, selectedAuthorUids) {
+  const selected = new Set((selectedAuthorUids || []).map(String));
+  const targets = (authors || []).filter((author) => selected.has(String(author.uid || "")));
+  if (!targets.length) throw new Error("请先展开“关注作者范围”，刷新列表并至少勾选一位作者");
+  const existingItems = await getAll("items");
+  const existingById = new Map(
+    existingItems
+      .filter((item) => item.source === "following")
+      .map((item) => [String(item.awemeId || ""), item]),
+  );
+  let nextIndex = existingItems.reduce((max, item) => Math.max(max, Number(item.index ?? -1)), -1) + 1;
+  let synced = 0;
+  for (let authorOrder = 0; authorOrder < targets.length; authorOrder += 1) {
+    const author = targets[authorOrder];
+    let maxCursor = 0;
+    let pageNumber = 0;
+    for (;;) {
+      if (downloadPauseRequested) return synced;
+      downloadBatchState.phase = `同步作者 ${authorOrder + 1}/${targets.length} · ${author.nickname}`;
+      setDownloadStatus("同步作品");
+      updateDownloadBatchProgress();
+      const page = await sendPageRequest("FETCH_AUTHOR_AWEME_PAGE", {
+        secUid: author.secUid,
+        maxCursor,
+        count: 18,
+      }, 60000);
+      if (!page?.ok || !Array.isArray(page.awemeList)) {
+        throw new Error(`读取作者“${author.nickname}”作品失败：${resultError(page)}`);
+      }
+      pageNumber += 1;
+      const pageItems = [];
+      for (const aweme of page.awemeList) {
+        const normalized = normalizeAweme(aweme, nextIndex, "following");
+        if (!normalized.awemeId || !normalized.mediaParts?.length) continue;
+        const existing = existingById.get(String(normalized.awemeId));
+        const item = {
+          ...(existing || {}),
+          ...normalized,
+          index: existing?.index ?? nextIndex,
+          source: "following",
+          authorUid: String(author.uid),
+          authorName: author.nickname || normalized.authorName || "未命名作者",
+          downloadStatus: existing?.downloadStatus || "not_started",
+          downloadedMediaParts: existing?.downloadedMediaParts || {},
+          downloadMediaPaths: existing?.downloadMediaPaths || [],
+          downloadImagePaths: existing?.downloadImagePaths || [],
+          downloadVideoPath: existing?.downloadVideoPath || "",
+          downloadCoverPath: existing?.downloadCoverPath || "",
+          lastError: existing?.lastError || "",
+        };
+        if (!existing) nextIndex += 1;
+        existingById.set(String(item.awemeId), item);
+        pageItems.push(item);
+      }
+      if (pageItems.length) await putItems(pageItems);
+      synced += pageItems.length;
+      logLine(`同步作者作品：${author.nickname} 第 ${pageNumber} 页，本页 ${pageItems.length} 条`, {
+        type: "following_author_page_checked",
+        authorUid: author.uid,
+        page: pageNumber,
+        count: pageItems.length,
+      });
+      const nextCursor = page.maxCursor ?? 0;
+      if (!page.hasMore || !page.awemeList.length || String(nextCursor) === "0") break;
+      if (String(nextCursor) === String(maxCursor)) throw new Error(`作者“${author.nickname}”作品游标没有前进`);
+      maxCursor = nextCursor;
+      await waitTracked("following_author_page_wait", 1200, { authorUid: author.uid, page: pageNumber });
+    }
+  }
+  return synced;
+}
+
+function setOneClickStatus(text) {
+  $("oneClickMeta").textContent = text;
+}
+
+async function likeSharedConversationWorks() {
+  setOneClickStatus(`正在读取私信“${SHARED_CONVERSATION_NAME}”的分享记录…`);
+  const scan = await sendPageRequest("SCAN_SHARED_CONVERSATION", {
+    targetName: SHARED_CONVERSATION_NAME,
+    maxPages: 200,
+    likeMissing: true,
+  }, 1_800_000);
+  if (!scan?.ok || !Array.isArray(scan.awemeIds)) {
+    throw new Error(scan?.error || `读取“${SHARED_CONVERSATION_NAME}”私信失败`);
+  }
+  const storedBinding = await getConfig("sharedConversationBinding", null);
+  if (storedBinding?.conversationKey && scan.conversationKey && storedBinding.conversationKey !== scan.conversationKey) {
+    throw new Error(`私信“${SHARED_CONVERSATION_NAME}”的账号标识与上次不同，已停止以避免处理同名用户`);
+  }
+  if (scan.conversationKey && !storedBinding?.conversationKey) {
+    await setConfig("sharedConversationBinding", {
+      name: SHARED_CONVERSATION_NAME,
+      conversationKey: scan.conversationKey,
+      boundAt: new Date().toISOString(),
+    });
+  }
+  const ids = [...new Set(scan.awemeIds.map(String).filter((id) => /^\d{16,22}$/.test(id)))];
+  if (!ids.length) {
+    const diagnostics = scan.diagnostics || {};
+    throw new Error(
+      `已打开“${SHARED_CONVERSATION_NAME}”，但没有识别到分享作品（发现卡片 ${scan.processedCards || 0}，卡片打开失败 ${scan.cardFailures || 0}，消息节点 ${diagnostics.childCount || 0}，滚动高度 ${diagnostics.scrollHeight || 0}）。已停止，未进入后续下载`,
+    );
+  }
+  const liked = Math.max(0, Number(scan.liked || 0));
+  const alreadyLiked = Math.max(0, Number(scan.alreadyLiked || 0));
+  const inaccessible = Math.max(0, Number(scan.cardFailures || 0));
+  if (inaccessible > 0) {
+    throw new Error(`有 ${inaccessible} 条分享未能打开或读取，当前扫描未完整完成；已停止后续下载`);
+  }
+  if (!scan.reachedHistoryStart) {
+    throw new Error("私信历史尚未扫描到底，当前扫描未完整完成；已停止后续下载");
+  }
+  if (Number(scan.unknownLikeState || 0) > 0) {
+    throw new Error(`有 ${scan.unknownLikeState} 条分享无法确认点赞状态，已停止以避免误取消点赞`);
+  }
+  logLine(`私信分享处理完成：发现 ${ids.length}，新增喜欢 ${liked}，已喜欢 ${alreadyLiked}，不可访问 ${inaccessible}`, {
+    type: "shared_conversation_liked",
+    targetName: SHARED_CONVERSATION_NAME,
+    found: ids.length,
+    liked,
+    alreadyLiked,
+    inaccessible,
+    reachedHistoryStart: Boolean(scan.reachedHistoryStart),
+  });
+  return { found: ids.length, liked, alreadyLiked, inaccessible };
+}
+
+async function runOneClickBackup() {
+  if (oneClickRunning || downloadRunning || running) return;
+  const selectedAuthors = await getSelectedFollowingAuthors();
+  if (!selectedAuthors.length) {
+    $("followingOptionsPanel").open = true;
+    setOneClickStatus("请先在“关注作者范围”中至少选择一位作者");
+    return;
+  }
+  oneClickRunning = true;
+  updateButtons();
+  try {
+    const shared = await likeSharedConversationWorks();
+    setOneClickStatus(
+      `分享扫描完成：发现 ${shared.found} · 新增喜欢 ${shared.liked} · 已喜欢 ${shared.alreadyLiked} · 不可访问 ${shared.inaccessible}，开始下载喜欢…`,
+    );
+    await runDownloadBatch("liked");
+    if (String(downloadBatchState.phase).startsWith("异常") || downloadBatchState.phase === "已暂停") {
+      throw new Error(`喜欢下载未完成：${downloadBatchState.phase}`);
+    }
+    setOneClickStatus("喜欢下载完成，开始下载收藏…");
+    await runDownloadBatch("bookmarked");
+    if (String(downloadBatchState.phase).startsWith("异常") || downloadBatchState.phase === "已暂停") {
+      throw new Error(`收藏下载未完成：${downloadBatchState.phase}`);
+    }
+    setOneClickStatus("收藏下载完成，开始下载所选关注作者…");
+    await runDownloadBatch("following");
+    if (String(downloadBatchState.phase).startsWith("异常") || downloadBatchState.phase === "已暂停") {
+      throw new Error(`关注作者下载未完成：${downloadBatchState.phase}`);
+    }
+    setOneClickStatus(
+      `一键备份完成 · 私信发现 ${shared.found} · 新增喜欢 ${shared.liked} · 已喜欢 ${shared.alreadyLiked} · 不可访问 ${shared.inaccessible}`,
+    );
+  } catch (error) {
+    const message = error?.message || String(error);
+    setOneClickStatus(`一键备份停止：${message}`);
+    setGlobalStatus("一键备份异常");
+    logLine(`一键备份异常：${message}`, { type: "one_click_backup_failed", error: message });
+  } finally {
+    oneClickRunning = false;
+    updateButtons();
+  }
+}
+
 
 async function runDownloadBatch(scope = "liked") {
   if (downloadRunning) return;
@@ -2745,11 +3621,12 @@ async function runDownloadBatch(scope = "liked") {
   activePerformanceTracker = createPerformanceTracker(scope);
   lastPerformanceSummary = null;
   activeDownloadTarget = null;
-  setView("download-task");
+  setView("download");
   const scopeDef = getDownloadScopeDefinition(scope);
   downloadBatchState = {
     total: 0,
     completed: 0,
+    sessionCompleted: 0,
     inspected: 0,
     currentOrder: 0,
     currentIndex: null,
@@ -2762,10 +3639,29 @@ async function runDownloadBatch(scope = "liked") {
   setDownloadStatus("准备下载");
   updateDownloadBatchProgress();
   logLine(scopeDef.startText, { type: "download_scope_start", scope: scopeDef.key });
+  const preparationStartedAt = timingNow();
+  let preparationLabel = "读取设置";
+  const updatePreparationStatus = () => {
+    if (!String(downloadBatchState.phase).startsWith("准备")) return false;
+    const elapsed = ((timingNow() - preparationStartedAt) / 1000).toFixed(1);
+    downloadBatchState.phase = `准备 · ${preparationLabel} · ${elapsed}s`;
+    setDownloadStatus(downloadBatchState.phase);
+    updateDownloadBatchProgress();
+    return true;
+  };
+  const markPreparation = (label) => {
+    preparationLabel = label;
+    updatePreparationStatus();
+  };
+  const preparationTimer = setInterval(() => {
+    if (!updatePreparationStatus()) clearInterval(preparationTimer);
+  }, 1000);
   try {
+    markPreparation("保存设置");
     await saveCurrentConfig();
     await setConfig("lastDownloadScope", scope);
     const config = await loadConfig();
+    markPreparation("连接下载文件夹");
     const rootHandle = await timedStage(
       "folder_resolve",
       () => chooseDownloadTarget({
@@ -2778,40 +3674,76 @@ async function runDownloadBatch(scope = "liked") {
     if (rootHandle.kind !== "filesystem") {
       throw new Error("未找到可用的已授权文件夹。请先点击“选择文件夹”，后续下载才不会出现在浏览器下载记录里。");
     }
-    const folderRecord = rootHandle.kind === "filesystem"
-      ? await getCachedDownloadRecord(rootHandle, { force: true })
-      : null;
-    if (rootHandle.kind === "filesystem") {
-      if (folderRecord) {
-        const recoveredFromFolder = ["liked", "bookmarked"].includes(scope) ? 0 : await recoverDownloadedItemsFromFolderRecord(rootHandle, scope);
-        if (recoveredFromFolder) logLine(`已从文件夹记录恢复 ${recoveredFromFolder} 条下载完成记录`, { type: "download_recovered_from_folder", count: recoveredFromFolder });
-      } else {
-        const resetCount = await resetDownloadStateForFreshFolder();
-        logLine(`该文件夹没有下载记录文件，本次按新任务从 0 开始${resetCount ? `，已重置本地 ${resetCount} 条旧下载标记` : ""}`, {
-          type: "download_folder_fresh_start",
-          folderName: rootHandle.label || "",
-          resetCount,
-        });
-      }
-    } else {
-      const recovered = await recoverDownloadedItemsFromLogs();
-      if (recovered) logLine(`已从日志恢复 ${recovered} 条下载完成记录`, { type: "download_recovered", count: recovered });
+    markPreparation("读取本地作品索引");
+    let localIndex = await getDownloadIndex(rootHandle);
+    const indexedTotal = [...Object.values(localIndex.scopes)].reduce((sum, ids) => sum + ids.size, 0);
+    if (!indexedTotal) {
+      const resetCount = await resetDownloadStateForFreshFolder();
+      logLine(`当前目录是新下载库${resetCount ? `，已清除浏览器中的 ${resetCount} 条旧目录下载标记` : ""}`, {
+        type: "download_folder_fresh_start",
+        folderName: rootHandle.label || "",
+        resetCount,
+      });
     }
+    markPreparation("校验文件夹账号绑定");
+    localIndex = await bindFolderToCurrentAccount(rootHandle, localIndex);
+    const folderRecord = { user: localIndex.user || {}, items: [] };
+    markPreparation("创建每日轻量备份");
+    const backedUp = await ensureDailyLightweightBackup(rootHandle, localIndex, downloadBatchState);
+    if (backedUp) {
+      logLine(`已创建 ${localDateKey()} 轻量数据库备份`, {
+        type: "daily_lightweight_backup_created",
+        folderName: rootHandle.label || "",
+      });
+    }
+    if (scope === "liked") preparationLabel = "复用登录状态并初始化喜欢列表";
     if (scope === "liked") {
-      await runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord);
+      await runLikedDownloadFlow(rootHandle, config, scopeDef, folderRecord, preparationStartedAt);
       return;
     }
+    if (scope === "bookmarked") preparationLabel = "复用登录状态并初始化收藏列表";
     if (scope === "bookmarked") {
-      await runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRecord);
+      await runBookmarkedDownloadFlow(rootHandle, config, scopeDef, folderRecord, preparationStartedAt);
       return;
     }
 
-    const selectedFollowingAuthors = scope === "following" ? await getSelectedFollowingAuthors() : [];
+    markPreparation("读取关注作者选择");
+    let selectedFollowingAuthors = scope === "following" ? await getSelectedFollowingAuthors() : [];
+    if (scope === "following") {
+      markPreparation("同步关注作者列表");
+      const followingAuthors = await syncFollowingAuthors();
+      if (!selectedFollowingAuthors.length) {
+        $("followingOptionsPanel").open = true;
+        await render();
+        throw new Error(`已读取 ${followingAuthors.length} 位关注作者，请展开“关注作者范围”并至少勾选一位作者`);
+      }
+      const validUids = new Set(followingAuthors.map((author) => String(author.uid)));
+      selectedFollowingAuthors = selectedFollowingAuthors.filter((uid) => validUids.has(String(uid)));
+      if (!selectedFollowingAuthors.length) {
+        await setSelectedFollowingAuthors([]);
+        $("followingOptionsPanel").open = true;
+        await render();
+        throw new Error("之前选择的作者已不在关注列表，请重新选择作者");
+      }
+      markPreparation("同步所选作者作品");
+      const syncedFollowingWorks = await syncFollowingAuthorWorks(followingAuthors, selectedFollowingAuthors);
+      logLine(`所选关注作者作品同步完成：${syncedFollowingWorks} 条`, {
+        type: "following_works_sync_finished",
+        selectedAuthors: selectedFollowingAuthors.length,
+        works: syncedFollowingWorks,
+      });
+    }
     let allStoredItems = await getAll("items");
     let items = allStoredItems
       .filter((item) => scopeDef.isEligible(item, { selectedFollowingAuthors }))
       .sort((a, b) => Number(a.index ?? 0) - Number(b.index ?? 0))
       .slice(0, Number(config.batchSize || DEFAULT_CONFIG.batchSize));
+    logLine(`准备检查完成，耗时 ${((timingNow() - preparationStartedAt) / 1000).toFixed(1)} 秒，找到 ${items.length} 条待下载记录`, {
+      type: "download_preparation_finished",
+      scope,
+      durationMs: timingNow() - preparationStartedAt,
+      pending: items.length,
+    });
     if (scope === "liked" && !items.length) {
       downloadBatchState.phase = "\u540c\u6b65\u559c\u6b22\u5217\u8868";
       setDownloadStatus("\u540c\u6b65\u4e2d");
@@ -2845,8 +3777,10 @@ async function runDownloadBatch(scope = "liked") {
       );
       return;
     }
-    downloadBatchState.total = items.length;
-    downloadBatchState.completed = 0;
+    const previouslyDownloaded = await countDownloadedInScope(scope);
+    downloadBatchState.total = previouslyDownloaded + items.length;
+    downloadBatchState.completed = previouslyDownloaded;
+    downloadBatchState.sessionCompleted = 0;
     if (rootHandle.kind === "downloads") {
       const uiResult = await sendRuntimeMessage({ type: "SET_DOWNLOAD_UI", enabled: false });
       if (!uiResult?.ok) {
@@ -2884,8 +3818,10 @@ async function runDownloadBatch(scope = "liked") {
       }
       try {
         await downloadOne(item, rootHandle, config);
+        await markDownloadIndexCompleted(rootHandle, scope, item.awemeId);
         downloaded += 1;
-        downloadBatchState.completed = downloaded;
+        downloadBatchState.sessionCompleted = downloaded;
+        downloadBatchState.completed = previouslyDownloaded + downloaded;
         await persistDownloadArtifacts(rootHandle, downloadBatchState, { itemCompleted: true });
       } catch (error) {
         if (isDownloadPausedError(error)) break;
@@ -2900,7 +3836,7 @@ async function runDownloadBatch(scope = "liked") {
         await persistDownloadArtifacts(rootHandle, downloadBatchState, { itemCompleted: true });
       }
       updateDownloadBatchProgress();
-      await render();
+      scheduleRender();
       await waitTracked("item_delay", randomDelay(config), { scope: scopeDef.key });
     }
     if (!downloadPauseRequested) {
@@ -2913,15 +3849,22 @@ async function runDownloadBatch(scope = "liked") {
       });
     }
   } catch (error) {
-    downloadBatchState.phase = "异常";
+    const errorMessage = error?.message || String(error);
+    downloadBatchState.phase = `异常 · ${errorMessage}`;
     setGlobalStatus("下载异常");
-    setDownloadStatus("异常");
+    setDownloadStatus(scope === "following" ? "关注下载异常" : "异常");
     updateDownloadBatchProgress();
     await finalizeDownloadPerformance();
-    logLine(`下载流程异常：${error.message}`);
+    logLine(`下载流程异常：${errorMessage}`);
   } finally {
+    clearInterval(preparationTimer);
+    if (activeDownloadTarget?.kind === "filesystem") {
+      await flushCompactWrites(activeDownloadTarget).catch((error) => {
+        logLine(`保存轻量下载状态失败：${error?.message || String(error)}`);
+      });
+    }
     await sendRuntimeMessage({ type: "SET_DOWNLOAD_UI", enabled: true });
-    if (!downloadPauseRequested && downloadBatchState.phase !== "异常") {
+    if (!downloadPauseRequested && !String(downloadBatchState.phase).startsWith("异常")) {
       setDownloadStatus("空闲");
       setGlobalStatus("空闲");
     } else if (downloadPauseRequested) {
@@ -2980,6 +3923,36 @@ $("favoriteBtn").addEventListener("click", async () => {
   await runFavoriteBatch();
 });
 
+$("downloadTabBtn").addEventListener("click", async () => {
+  setView("download");
+  await render();
+});
+$("favoriteTabBtn").addEventListener("click", async () => {
+  setView("favorite");
+  await render();
+});
+
+$("followingOptionsPanel").addEventListener("toggle", () => {
+  if (!$("followingOptionsPanel").open) return;
+  $("followingSelectionMeta").textContent = "正在同步关注作者…";
+  void syncFollowingAuthors().then(() => render()).catch((error) => {
+    $("followingSelectionMeta").textContent = error?.message || String(error);
+  });
+});
+
+$("refreshFollowingBtn").addEventListener("click", async () => {
+  $("refreshFollowingBtn").disabled = true;
+  $("followingSelectionMeta").textContent = "正在刷新关注作者…";
+  try {
+    await syncFollowingAuthors({ force: true });
+    await render();
+  } catch (error) {
+    $("followingSelectionMeta").textContent = error?.message || String(error);
+  } finally {
+    $("refreshFollowingBtn").disabled = false;
+  }
+});
+
 $("stopBtn").addEventListener("click", () => {
   stopRequested = true;
   setGlobalStatus("停止中");
@@ -2994,10 +3967,10 @@ $("auditBtn").addEventListener("click", async () => {
 async function resolveContinueDownloadScope() {
   const fallbackScope = await getConfig("lastDownloadScope", "liked");
   const storedTarget = await getStoredDownloadTarget({ requestPermission: true });
-  const folderRecord = storedTarget?.permission === "granted"
-    ? await getCachedDownloadRecord(storedTarget, { force: true })
+  const folderProgress = storedTarget?.permission === "granted"
+    ? await readDownloadProgressRecord(storedTarget)
     : null;
-  const scope = folderRecord?.current?.scope || fallbackScope || "liked";
+  const scope = folderProgress?.current?.scope || fallbackScope || "liked";
   return ["liked", "bookmarked", "following"].includes(scope) ? scope : "liked";
 }
 
@@ -3023,15 +3996,19 @@ $("downloadFollowingBtn").addEventListener("click", async () => {
   await runDownloadBatch("following");
 });
 
+$("oneClickBackupBtn").addEventListener("click", async () => {
+  await runOneClickBackup();
+});
+
 $("selectAllFollowingBtn").addEventListener("click", async () => {
-  const authors = buildFollowingAuthors(await getAll("items"));
+  const authors = buildFollowingAuthors(await getAll("items"), await getCachedFollowingAuthors());
   const values = authors.map((author) => author.authorUid);
   await setSelectedFollowingAuthors(values);
   renderFollowingAuthors(authors, values);
 });
 
 $("clearFollowingSelectionBtn").addEventListener("click", async () => {
-  const authors = buildFollowingAuthors(await getAll("items"));
+  const authors = buildFollowingAuthors(await getAll("items"), await getCachedFollowingAuthors());
   await setSelectedFollowingAuthors([]);
   renderFollowingAuthors(authors, []);
 });
@@ -3055,7 +4032,7 @@ $("pauseDownloadTaskBtn").addEventListener("click", () => {
 });
 
 $("backToHomeBtn").addEventListener("click", () => {
-  setView("home");
+  setView("download");
 });
 
 $("restartCurrentDownloadBtn").addEventListener("click", async () => {
@@ -3076,6 +4053,17 @@ function renderSidebarCollapsed(collapsed) {
   button.setAttribute("title", sidebarCollapsed ? "展开面板" : "收起面板");
 }
 
+function isDownloadedInScope(item, scope) {
+  if (item.downloadStatus !== "downloaded") return false;
+  if (scope === "bookmarked") return item.source === "bookmarked";
+  if (scope === "following") return item.source === "following";
+  return ["liked", "favorite_api"].includes(item.source);
+}
+
+async function countDownloadedInScope(scope) {
+  return (await getAll("items")).filter((item) => isDownloadedInScope(item, scope)).length;
+}
+
 $("collapseBtn").addEventListener("click", () => {
   parent.postMessage({
     source: "douyin-toolkit-sidebar",
@@ -3085,6 +4073,11 @@ $("collapseBtn").addEventListener("click", () => {
 });
 
 window.addEventListener("message", (event) => {
+  if (event.source === parent && event.data?.source === "douyin-toolkit-page" && event.data?.type === "SHARED_SCAN_PROGRESS" && oneClickRunning) {
+    const progress = event.data.payload || {};
+    setOneClickStatus(`私信分享：已检查 ${Number(progress.processed || 0)} · 新增喜欢 ${Number(progress.liked || 0)} · 已喜欢 ${Number(progress.alreadyLiked || 0)} · 未处理 ${Number(progress.failed || 0)}`);
+    return;
+  }
   if (event.data?.source !== "douyin-toolkit-content" || event.data?.type !== "SIDEBAR_COLLAPSE_STATE") return;
   renderSidebarCollapsed(event.data.payload?.collapsed);
 });
@@ -3095,9 +4088,9 @@ $("pickFolderBtn").addEventListener("click", () => {
       logLine(`打开文件夹选择页失败：${chrome.runtime.lastError?.message || response?.error || "unknown"}`);
       return;
     }
-    logLine("已打开文件夹选择页，选择后会记住并复用该目录", {
+    logLine("已打开文件夹选择窗口，选择后会记住并复用该目录", {
       type: "download_target_picker_opened",
-      tabId: response.tabId || null,
+      windowId: response.windowId || null,
     });
   });
 });
@@ -3125,4 +4118,6 @@ window.addEventListener("douyin-toolkit-boot", (event) => {
 
 await render();
 void refreshRemoteProfileSummary({ silent: false });
-setInterval(() => scheduleRender(0), 2500);
+setInterval(() => {
+  if (running) scheduleRender(0);
+}, 5000);

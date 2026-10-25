@@ -15,6 +15,8 @@ backend/.douyin-playwright-profile/
 # Personal progress and downloaded media
 douyin-favorite-progress.json
 backend/data/*.json
+backend/data/**
+backend/data/shared-conversation-probe/
 !backend/data/.gitkeep
 downloads/
 DouyinBackup/

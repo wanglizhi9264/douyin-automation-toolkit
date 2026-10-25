@@ -1,147 +1,82 @@
-# 抖音收藏备份助手
+# 抖音备份工具
 
-这是一个本地运行的抖音收藏与备份工具集，主要用于把网页版抖音「喜欢」列表里的作品批量加入收藏，并对已处理作品做审计和下载备份。
+Chrome/Edge MV3 扩展，用于下载当前账号的喜欢、收藏和所选关注作者作品，并支持“喜欢转收藏”。插件当前版本 0.6.2，后端 0.3.0；下载文件与完成索引用于恢复，浏览器数据库用于业务元数据。
 
-项目当前包含两条路线：
+## 当前验收状态
 
-- Chrome 插件：直接使用当前浏览器里的抖音登录态，在抖音网页内显示侧边栏，执行收藏、审计和下载。
-- 后端脚本：早期 Playwright 自动化脚本和本地 dashboard，用于批处理、调试和历史数据迁移。
+2026-10-09 已完成源码与业务审查：[审查结果及整改顺序](docs/project-audit-2026-10-09.md)。自动检查通过，但本地库统计与完整任务判定存在缺口，不能把“一键完整备份”当作已通过全流程验收。
 
-## 目录结构
+- 本地 HTML 会漏掉历史元数据，并把关注作品错误归类为喜欢；不要据此判断整个库的完成量。
+- 关注下载目前每次只处理一个配置批次（默认 100 条），结束不代表所选作者全部完成。
+- 私信点赞与后续下载是不同阶段；会话身份预校验、超时取消与暂停控制仍待完善。
+- 不要让插件和后端同时写同一目录；后端尚未同步维护插件的紧凑完成索引与数量缓存。
+- 不自动删除媒体、旧 HTML 或嵌套历史目录；需先核对来源和未完成文件。
+
+## 当前功能
+
+- 下载喜欢、收藏、关注作者作品；关注作者会先同步关注列表，选择作者后再分页同步其作品。
+- 显示平台总数、本地完成缓存与待下载估算；平台当前量、本地累计量和任务目标量不能混为一个总数。
+- 选择历史目录时自动继续；选择新目录时先提示用户。
+- 视频、图文、多段媒体和封面下载。
+- HTTP Range 断点续传。
+- 喜欢转收藏及审计。
+- 一键流程按“私信分享点赞 → 喜欢 → 收藏 → 所选关注作者”串行编排；完整成功条件尚待整改，参见审查报告。
+
+## 使用
+
+1. 在 `chrome://extensions` 或 `edge://extensions` 开启开发者模式。
+2. 加载 `plugin/` 目录。
+3. 打开并登录 `https://www.douyin.com/`。
+4. 打开扩展侧边栏，选择下载文件夹。
+5. 选择“喜欢”“收藏”或“关注作者”。
+
+使用“一键完整备份”前，先确认当前账号、备份目录以及“关注作者范围”。插件会自动定位昵称完全匹配“王立志”的会话，但昵称不等于稳定身份：当前同名选择与绑定校验尚不足以保证不会处理错误会话。未完成身份与取消机制整改前，不建议无人值守运行该功能。
+
+下载关注作者作品前，先展开“关注作者范围”。插件会从抖音同步关注列表；至少勾选一位作者后再点击“关注作者”。为了避免误操作，未选择作者时不会默认下载全部关注账号。
+
+旧目录索引缺失时会扫描重建；后续打开侧边栏优先读取缓存。当前重建对多段未完成目录检查不足，索引缺失时需先核对，不可把扫描计数当成媒体完整性认证。
+
+## 本地目录
 
 ```text
-.
-├── AGENTS.md      # 项目给 Agent/协作者看的工作说明
-├── SPEC.md        # 产品和技术方案说明
-├── docs/          # 经验沉淀、接口说明、约束记录
-├── plugin/        # Chrome MV3 插件
-├── backend/       # Playwright 脚本、本地 dashboard、配置和本地数据
-└── frontend/      # 预留的独立前端目录
+下载目录/
+├─ data/
+│  ├─ 点赞/
+│  │  ├─ 视频/
+│  │  ├─ 图片/
+│  │  └─ 封面/
+│  ├─ 收藏/
+│  ├─ 关注/
+│  └─ .appdata/
+│     ├─ download-state.json
+│     ├─ download-progress.json
+│     ├─ download-counts.json
+│     ├─ download-index.json
+│     ├─ backups/YYYY-MM-DD/download-metadata.json
+│     └─ manifests/
+└─ 本地库.html
 ```
 
-接口与经验沉淀文档：
+`download-index.json` 保存各作用域完成 ID，`download-counts.json` 是首屏计数缓存。作品完成后更新内存，索引、数量和进度延迟合并写盘，任务收尾尝试刷新；当前写失败的重试与一致性仍待完善，浏览器强制关闭不能保证刷新。当天首次启动下载任务时创建轻量元数据备份，不复制媒体，也不是定时后台备份。
 
-- [docs/douyin-access-surfaces.md](/Users/lichi/Digital_life/07_j/docs/douyin-access-surfaces.md)
+“本地唯一作品数”按三个完成集合的并集计算；各来源条目之和包含重复 ID。“消失留存”只表示不在最近完整可读喜欢列表中，不能等同于“被删除”。
 
-## Chrome 插件
+## 开发与测试
 
-插件目录：
-
-```text
-plugin/
-```
-
-安装方式：
-
-1. 打开 Chrome：`chrome://extensions`
-2. 开启「开发者模式」
-3. 点击「加载已解压的扩展程序」
-4. 选择本项目里的 `plugin/` 目录
-5. 打开 `https://www.douyin.com/`，使用侧边栏操作
-
-常用命令：
-
-```bash
+```powershell
 cd plugin
 npm run check
-npm run zip
+node scripts/benchmark-performance.mjs
+
+cd ..\backend
+npm run check
+npm run test:shares
 ```
 
-插件能力：
+更详细的当前设计和维护方法见 [docs/README.md](docs/README.md)。
 
-- 检测当前抖音网页登录态
-- 导入后端进度文件
-- 从断点继续收藏
-- 已收藏作品直接算成功
-- 审计最近处理过的作品，漏收藏会标回待处理
-- 下载已成功收藏作品的视频、封面、单条 manifest 和本地数据库文件
-- 下载前校验 HTTP 状态、MIME 类型、文件大小和 0 字节等异常
-- 遇到限流、登录异常或接口异常时暂停并记录原因
+## 注意
 
-## 后端脚本
-
-后端目录：
-
-```text
-backend/
-```
-
-安装依赖：
-
-```bash
-cd backend
-npm install
-```
-
-常用命令：
-
-```bash
-npm run douyin:login
-npm run douyin:run
-npm run douyin:audit
-npm run douyin:cycle
-npm run douyin:dashboard
-```
-
-本地 dashboard 默认地址：
-
-```text
-http://127.0.0.1:4777/
-```
-
-## 本地数据
-
-本地进度和个人数据不会提交到 Git：
-
-```text
-backend/data/douyin-favorite-progress.json
-backend/data/douyin-full-audit-result.json
-backend/.douyin-playwright-profile/
-plugin/dist/
-```
-
-这些文件包含运行状态、浏览器 profile 或构建产物，只在本机使用。
-
-## 下载保存结构
-
-插件优先写入用户授权的本地文件夹。目录结构参考抖珍藏的备份习惯，但由本项目重新实现：
-
-```text
-data/
-├── 点赞/
-│   ├── 视频/
-│   │   └── <awemeId>.mp4
-│   └── 封面/
-│       └── <awemeId>.jpg
-└── .appdata/
-    ├── download-state.json
-    ├── db_likes.json
-    ├── db_authors.json
-    ├── db_videos.json
-    ├── db_texts.json
-    └── manifests/
-        └── <awemeId>.json
-本地库.html
-说明.txt
-```
-
-## GitHub
-
-远程仓库：
-
-```text
-git@github.com:wanglizhi9264/douyin-automation-toolkit.git
-```
-
-当前主分支：
-
-```text
-main
-```
-
-## 注意事项
-
-- 本项目不复制第三方闭源插件代码，只参考公开可观察的功能形态重新实现。
-- 不绕过抖音风控；出现「稍后再试」「访问频繁」等提示时应暂停，等待后续手动继续。
-- 下载内容默认保存到本地，不上传到任何远程服务。
-- 批量操作请控制节奏，避免触发平台限流。
+- 抖音接口、登录态和风控可能变化。
+- 切换账号时不要复用其他账号的下载目录。
+- 修改扩展代码后需要在扩展管理页重新加载；正在下载时先暂停。

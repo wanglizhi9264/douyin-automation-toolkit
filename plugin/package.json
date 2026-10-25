@@ -1,10 +1,10 @@
 {
   "name": "douyin-toolkit-extension",
-  "version": "0.5.0",
+  "version": "0.6.2",
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node scripts/check-extension.mjs && node scripts/test-content-bridge.mjs && node scripts/test-download-target.mjs && node scripts/test-download-record.mjs && node scripts/test-bookmarked-sync.mjs && node scripts/test-liked-sync.mjs && node scripts/test-liked-state.mjs && node scripts/test-media-parts.mjs && node scripts/test-report.mjs && node scripts/test-performance.mjs",
+    "check": "node scripts/check-extension.mjs && node scripts/test-content-bridge.mjs && node scripts/test-sidebar-ui.mjs && node scripts/test-one-click-backup.mjs && node scripts/test-download-target.mjs && node scripts/test-download-index.mjs && node scripts/test-download-record.mjs && node scripts/test-bookmarked-sync.mjs && node scripts/test-liked-sync.mjs && node scripts/test-liked-state.mjs && node scripts/test-media-parts.mjs && node scripts/test-report.mjs && node scripts/test-performance.mjs",
     "zip": "node scripts/zip-extension.mjs"
   }
 }

@@ -161,6 +161,66 @@ export async function readTextFile(target, relativePath) {
   return await (await file.getFile()).text();
 }
 
+async function getFilesystemFileHandle(target, relativePath, { create = true } = {}) {
+  const parts = relativePath.split("/").filter(Boolean);
+  const fileName = parts.pop();
+  let dir = target.handle;
+  for (const part of parts) {
+    dir = await dir.getDirectoryHandle(part, { create });
+  }
+  return await dir.getFileHandle(fileName, { create });
+}
+
+async function removeFilesystemFile(target, relativePath) {
+  const parts = relativePath.split("/").filter(Boolean);
+  const fileName = parts.pop();
+  let dir = target.handle;
+  try {
+    for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: false });
+    await dir.removeEntry(fileName);
+  } catch {}
+}
+
+function mediaResumeKey(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin + parsed.pathname;
+  } catch {
+    return String(url);
+  }
+}
+
+async function streamResponseToFile(file, response, { offset = 0, onChunk = null } = {}) {
+  const writable = await file.createWritable({ keepExistingData: offset > 0 });
+  let received = 0;
+  try {
+    if (offset > 0) await writable.seek(offset);
+    if (!response.body?.getReader) {
+      const blob = await response.blob();
+      await writable.write(blob);
+      received = blob.size;
+      onChunk?.(received);
+    } else {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value?.byteLength) continue;
+        await writable.write(value);
+        received += value.byteLength;
+        onChunk?.(received);
+      }
+    }
+    await writable.truncate(offset + received);
+    await writable.close();
+    return received;
+  } catch (error) {
+    // Keep successfully written bytes so the next attempt can resume with Range.
+    try { await writable.close(); } catch {}
+    throw error;
+  }
+}
+
 export async function downloadVerifiedMedia(target, relativePath, url, {
   expected = "video",
   headerTimeoutMs = 30000,
@@ -173,26 +233,56 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
   const timingNow = () => globalThis.performance?.now?.() ?? Date.now();
   const startedAt = timingNow();
   let phase = "request";
-  const headerTimeout = setTimeout(() => controller.abort(), headerTimeoutMs);
-  const totalTimeout = setTimeout(() => controller.abort(), totalTimeoutMs);
+  let timeoutReason = "header";
+  let timeout = setTimeout(() => controller.abort(), headerTimeoutMs);
   try {
+    const file = await getFilesystemFileHandle(target, relativePath);
+    const resumeStatePath = relativePath + ".resume.json";
+    let resumeKey = "";
+    try {
+      resumeKey = JSON.parse(await readTextFile(target, resumeStatePath))?.key || "";
+    } catch {}
+    const expectedResumeKey = mediaResumeKey(url);
+    let existingSize = (await file.getFile()).size;
+    if (existingSize > 0 && resumeKey !== expectedResumeKey) {
+      const reset = await file.createWritable();
+      await reset.close();
+      existingSize = 0;
+    }
+    await writeFile(target, resumeStatePath, JSON.stringify({ key: expectedResumeKey }));
     const response = await fetch(url, {
       credentials: "omit",
       signal: controller.signal,
-      headers: { "accept": "*/*" },
+      headers: {
+        "accept": "*/*",
+        ...(existingSize > 0 ? { Range: `bytes=${existingSize}-` } : {}),
+      },
     });
     const headersAt = timingNow();
     phase = "download";
-    clearTimeout(headerTimeout);
+    clearTimeout(timeout);
+    timeoutReason = "stall";
+    const armStallTimeout = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => controller.abort(), totalTimeoutMs);
+    };
+    armStallTimeout();
     const contentType = response.headers.get("content-type") || "";
     const contentLength = Number(response.headers.get("content-length") || 0);
     const acceptRanges = response.headers.get("accept-ranges") || "";
-    if (response.status === 206) {
-      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u610f\u5916\u6536\u5230\u5206\u6bb5\u54cd\u5e94 206");
-    }
     if (response.status < 200 || response.status >= 300) {
       throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1aHTTP " + response.status);
     }
+    const contentRange = response.headers.get("content-range") || "";
+    const rangeMatch = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+    const resumed = existingSize > 0 && response.status === 206;
+    if (resumed && (!rangeMatch || Number(rangeMatch[1]) !== existingSize)) {
+      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1aRange \u8d77\u70b9\u4e0e\u672c\u5730\u6587\u4ef6\u4e0d\u4e00\u81f4");
+    }
+    const writeOffset = resumed ? existingSize : 0;
+    const expectedTotal = resumed && rangeMatch?.[3] !== "*"
+      ? Number(rangeMatch[3])
+      : contentLength;
     if (expected === "video" && !contentType.includes("video/mp4")) {
       throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u89c6\u9891 MIME \u4e3a " + (contentType || "unknown"));
     }
@@ -202,21 +292,27 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     if (expected === "video" && !contentLength) {
       throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u672a\u8fd4\u56de\u89c6\u9891\u5927\u5c0f");
     }
-    const blob = await response.blob();
+    const received = await streamResponseToFile(file, response, {
+      offset: writeOffset,
+      onChunk: armStallTimeout,
+    });
     const downloadedAt = timingNow();
-    if (!blob.size) {
+    const finalSize = writeOffset + received;
+    if (!received && !writeOffset) {
       throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a0 \u5b57\u8282");
     }
-    if (contentLength && blob.size !== contentLength) {
-      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u5927\u5c0f\u4e0d\u4e00\u81f4 " + blob.size + "/" + contentLength);
+    if (expectedTotal && finalSize !== expectedTotal) {
+      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u5927\u5c0f\u4e0d\u4e00\u81f4 " + finalSize + "/" + expectedTotal);
     }
     phase = "write";
-    await writeFile(target, relativePath, blob);
     const writtenAt = timingNow();
+    await removeFilesystemFile(target, resumeStatePath);
     return {
       ok: true,
-      size: blob.size,
-      contentType: blob.type || contentType,
+      size: finalSize,
+      contentType,
+      resumed,
+      resumedBytes: writeOffset,
       timings: {
         requestMs: headersAt - startedAt,
         transferMs: downloadedAt - headersAt,
@@ -227,18 +323,18 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
         ok: true,
         httpStatus: response.status,
         contentType,
-        contentLength: blob.size,
+        contentLength: finalSize,
         acceptRanges,
-        sizeLabel: (blob.size / 1024 / 1024).toFixed(1) + "MB",
+        sizeLabel: (finalSize / 1024 / 1024).toFixed(1) + "MB",
       },
     };
   } catch (error) {
     controller.abort();
     if (error?.name === "AbortError") {
-      if (phase === "request") {
+      if (timeoutReason === "header") {
         throw new Error("\u7b49\u5f85\u5a92\u4f53\u54cd\u5e94\u8d85\u8fc7 " + Math.round(headerTimeoutMs / 1000) + " \u79d2");
       }
-      throw new Error("\u5a92\u4f53\u4e0b\u8f7d\u8d85\u8fc7 " + Math.round(totalTimeoutMs / 1000) + " \u79d2");
+      throw new Error("\u5a92\u4f53\u4e0b\u8f7d\u8fde\u7eed " + Math.round(totalTimeoutMs / 1000) + " \u79d2\u672a\u6536\u5230\u6570\u636e");
     }
     const message = error?.message || String(error);
     if (message.startsWith("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25")) throw error;
@@ -251,8 +347,7 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     } catch {}
     throw new Error("\u6269\u5c55\u6293\u53d6\u5931\u8d25(" + host + ")\uff1a" + message);
   } finally {
-    clearTimeout(headerTimeout);
-    clearTimeout(totalTimeout);
+    clearTimeout(timeout);
   }
 }
 

@@ -7,7 +7,12 @@ const replies = [];
 const requests = [];
 
 globalThis.location = { href: "https://www.douyin.com/user/self" };
-globalThis.document = { title: "Douyin" };
+globalThis.document = { title: "Douyin", cookie: "UIFID=uifid-test; hevc_supported=true; is_dash_user=1" };
+globalThis.localStorage = {
+  getItem(key) {
+    return key === "SysInfo" ? JSON.stringify({ webid: "webid-test" }) : null;
+  },
+};
 globalThis.window = {
   addEventListener(type, listener) {
     listeners.set(type, listener);
@@ -37,6 +42,34 @@ globalThis.fetch = async (url) => {
           aweme_list: [{ aweme_id: "123", desc: "sample" }],
           has_more: 1,
           max_cursor: 456,
+        });
+      },
+    };
+  }
+  if (String(url).includes("/user/following/list/")) {
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          status_code: 0,
+          followings: [{ uid: "author-1", sec_uid: "sec-author-1", nickname: "author" }],
+          has_more: 0,
+          offset: 20,
+        });
+      },
+    };
+  }
+  if (String(url).includes("/aweme/post/")) {
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          status_code: 0,
+          aweme_list: [{ aweme_id: "author-video-1" }],
+          has_more: 0,
+          max_cursor: 0,
         });
       },
     };
@@ -104,6 +137,38 @@ assert.equal(likedReply.message.payload.maxCursor, 456);
 assert.match(requests.at(-1), /sec_user_id=sec-test/);
 assert.match(requests.at(-1), /max_cursor=123/);
 assert.match(requests.at(-1), /min_cursor=7/);
+
+await onMessage({
+  source: globalThis.window,
+  data: {
+    source: "douyin-toolkit-content",
+    requestId: "following-1",
+    type: "FETCH_FOLLOWING_PAGE",
+    payload: { userId: "user-test", secUid: "sec-test", offset: 0, count: 20, maxTime: 0, minTime: 0 },
+  },
+});
+const followingReply = replies.find((entry) => entry.message.requestId === "following-1");
+assert.equal(followingReply.message.payload.ok, true);
+assert.equal(followingReply.message.payload.users[0].sec_uid, "sec-author-1");
+assert.match(requests.at(-1), /user_id=user-test/);
+assert.match(requests.at(-1), /sec_user_id=sec-test/);
+assert.match(requests.at(-1), /source_type=1/);
+assert.match(requests.at(-1), /webid=webid-test/);
+assert.match(requests.at(-1), /uifid=uifid-test/);
+
+await onMessage({
+  source: globalThis.window,
+  data: {
+    source: "douyin-toolkit-content",
+    requestId: "author-posts-1",
+    type: "FETCH_AUTHOR_AWEME_PAGE",
+    payload: { secUid: "sec-author-1", maxCursor: 0, count: 18 },
+  },
+});
+const authorPostsReply = replies.find((entry) => entry.message.requestId === "author-posts-1");
+assert.equal(authorPostsReply.message.payload.ok, true);
+assert.equal(authorPostsReply.message.payload.awemeList[0].aweme_id, "author-video-1");
+assert.match(requests.at(-1), /sec_user_id=sec-author-1/);
 
 
 console.log("OK: liked-list page request runtime test passed");

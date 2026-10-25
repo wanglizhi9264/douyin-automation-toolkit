@@ -118,6 +118,19 @@ export async function addLog(text, level = "info", meta = null) {
 }
 
 export async function recentLogs(limit = 120) {
-  const logs = await getAll("logs");
-  return logs.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).slice(-limit);
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const logs = [];
+    const request = db.transaction("logs").objectStore("logs").openCursor(null, "prev");
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor || logs.length >= limit) {
+        resolve(logs.reverse());
+        return;
+      }
+      logs.push(cursor.value);
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error);
+  });
 }

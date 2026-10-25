@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   analyzeDownloadRecord,
   buildEnhancedDownloadReportHtml,
+  buildLocalLibraryHtml,
   classifyFailureReason,
   videoDiagnosticsForItem,
 } from "../src/shared/report.js";
@@ -181,5 +182,16 @@ assert.match(html, /2160×3840/);
 assert.match(html, /1080×1920/);
 assert.match(html, /&lt;script&gt;alert/);
 assert.doesNotMatch(html, /<script>alert\('xss'\)<\/script>/);
+
+const library = buildLocalLibraryHtml({
+  generatedAt: "2026-10-06T00:00:00.000Z",
+  items,
+}, "test-folder");
+assert.match(library, /<title>抖音本地库<\/title>/);
+assert.match(library, /const PAGE=100/);
+assert.match(library, /搜索作品 ID、作者或描述/);
+assert.match(library, /匹配/);
+assert.match(library, /\\u003cscript>alert/);
+assert.doesNotMatch(library, /<script>alert\('xss'\)<\/script>/);
 
 console.log("OK: enhanced local library analytics, quality diagnostics, filters, and XSS escaping passed");

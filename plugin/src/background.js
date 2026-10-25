@@ -24,10 +24,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "OPEN_FOLDER_PICKER_TAB") {
     const pickerUrl = new URL(chrome.runtime.getURL("src/folder-picker/index.html"));
     if (sender.tab?.id != null) pickerUrl.searchParams.set("returnTabId", String(sender.tab.id));
-    chrome.tabs.create({ url: pickerUrl.toString() }, (tab) => {
+    chrome.windows.create({
+      url: pickerUrl.toString(),
+      type: "popup",
+      width: 560,
+      height: 520,
+      focused: true,
+    }, (windowInfo) => {
       const error = chrome.runtime.lastError;
       if (error) sendResponse({ ok: false, error: error.message });
-      else sendResponse({ ok: true, tabId: tab?.id || null });
+      else sendResponse({ ok: true, windowId: windowInfo?.id || null });
     });
     return true;
   }

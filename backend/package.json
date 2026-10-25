@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "douyin:probe-shares": "node scripts/probe-shared-conversation.mjs",
+    "test:shares": "node scripts/test-shared-conversation.mjs",
     "douyin:login": "node scripts/douyin-favorite-liked.mjs login",
     "douyin:probe": "node scripts/douyin-favorite-liked.mjs probe",
     "douyin:run": "node scripts/douyin-favorite-liked.mjs run",

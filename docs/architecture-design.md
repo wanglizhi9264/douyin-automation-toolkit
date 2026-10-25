@@ -1,291 +1,125 @@
-# 架构设计：列表扫描、最高画质下载与断点续跑
+# 架构与业务规则
 
-## 1. 设计目标
+## 文档状态
 
-本设计支撑喜欢、收藏和其他来源的统一下载，并保持三条边界：
+更新于 2026-10-09。本文同时描述现有组件和必须满足的业务约束；“必须/不能”是验收要求，不能据此推断当前实现已经全部符合。当前偏差和关闭条件见 [项目业务审查](project-audit-2026-10-09.md)，尤其是本地库、目录迁移、私信身份/取消、关注全量完成和写失败恢复。
 
-- 抖音账号态相关请求在页面上下文执行。
-- 调度、状态机、日志和 UI 在扩展侧边栏执行。
-- 续跑真相同时落在浏览器 IndexedDB 和用户文件夹，其中目标文件夹记录优先。
+## 产品界面
 
-收藏列表的获取方式参考经授权分析的扩展行为；视频画质选择、下载、校验和本地状态由本项目自己的实现负责。
+侧边栏只有两个一级界面：
 
-## 2. 组件图
+1. 下载：目录、喜欢/收藏/关注作者三个入口、必要数量、当前任务和基础设置。
+2. 喜欢转收藏：总数、完成、待处理、暂停/阻塞和任务控制。
 
-```mermaid
-flowchart LR
-    U["用户 / 侧边栏"] --> S["sidebar/app.js<br/>任务状态机"]
-    S --> E["shared/events.js<br/>请求-响应桥"]
-    E --> C["content.js<br/>跨上下文转发"]
-    C --> I["injected.js<br/>抖音页面上下文"]
-    I --> A["抖音 Web API"]
-    I --> M["媒体 CDN"]
-    S --> Q["shared/api.js<br/>画质候选排序"]
-    S --> B["bookmarked-sync / liked-sync<br/>分页与归一化"]
-    S --> D["shared/db.js<br/>IndexedDB v2"]
-    S --> F["shared/download.js<br/>目录授权与写盘"]
-    I --> F
-    F --> R["用户授权目录<br/>状态 / 数据库 / 日志 / 媒体"]
+诊断日志、性能样本和内部游标不进入主业务界面。
+
+## 组件
+
+- `content.js`：挂载侧边栏并转发页面消息。
+- `injected.js`：在抖音页面上下文调用账号态接口。
+- `sidebar/app.js`：业务编排、分页、下载、状态与界面。
+- `shared/db.js`：IndexedDB 配置、作品和日志。
+- `shared/download.js`：文件写入、媒体校验和 Range 续传。
+- `shared/download-index.js`：三个作用域的完成集合与序列化。
+- `shared/report.js`：本地 HTML/画质报告派生展示，不能参与是否下载完成的判断。
+- `folder-picker/`：目录授权、历史库识别和新目录确认。
+- `backend/`：独立 Playwright 下载与诊断工具，不是插件运行依赖。
+
+## 页面接口
+
+核心业务包括当前用户、喜欢列表、收藏列表、关注列表、作者作品列表、作品详情、收藏动作和点赞动作八类；这不是页面全部 HTTP 请求或底层端点的总数。私信还有 DOM 交互、网页自身请求，媒体使用 CDN URL。接口失败必须保留检查点与已写入文件，重新开始任务可从第一页对账，不能把部分扫描误判为完成。
+
+私信分享当前按完全匹配“王立志”的会话项选择并等待消息区出现。作品 ID 从该卡片 `message.parsedContent.itemId` 读取；点击 `.MessageItemShareAwemeplayIcon`，等待真实弹窗、匹配 ID 和点赞状态。明确未点赞才点击并确认变化，已点赞跳过；关闭后重新获取 DOM、恢复扫描位置，以作品 ID 去重。上限结束不等于历史扫描完整，打开失败不是已删除证明。
+
+安全验收要求：先只读解析并核对稳定用户/会话 ID、当前账号和下载目录，再允许任何点赞。昵称与空 conversationKey 不能作为身份认证。私信 runId 必须贯穿页面与侧栏，暂停、超时、关闭后须确认协作取消；不能只停止等待结果却让页面继续操作。当前实现的绑定校验在扫描后、取消协议缺失，尚不满足这些条件。
+
+关注作者下载不能依赖 IndexedDB 中偶然存在的旧记录。展开作者范围时同步关注列表并缓存 10 分钟；开始下载时校验已选作者仍在关注列表，然后分页同步所选作者作品并交给统一下载器。未选择作者时必须停止并提示，不能默认下载全部关注账号。
+
+## 下载目录规则
+
+- 目录中存在下载索引或历史状态：视为历史下载库，直接续传。
+- 不存在历史记录：必须提示用户确认，确认后才初始化新下载库。
+- 所有下载作用域在开始前统一校验账号绑定；状态中的账号与当前账号不同，停止写入并要求选择新目录。
+- 文件完整性及必需媒体段检查是最终依据；完成索引是可重建的快速查询投影，IndexedDB/快照是业务与元数据。
+- 存在 `.resume.json` 的媒体是未完成文件，不能计入已下载。
+
+当前旧目录扫描对子目录直接计数，未验证嵌套续传、空目录和全部媒体段，须整改后才满足上述规则。不得在无法读取目录时把错误伪装成“空库”，不得用当前登录缓存给未知归属旧库自动绑定账号。
+
+## 数量索引
+
+`data/.appdata/download-counts.json` 是轻量本地数量索引：
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": "ISO-8601",
+  "counts": { "liked": 0, "bookmarked": 0, "following": 0 }
+}
 ```
 
-## 3. 组件职责
-
-### 3.1 `content.js`
-
-- 创建扩展 iframe 和页面注入脚本。
-- 只转发协议内消息，不实现业务状态机。
-- 等待 iframe 可用后再发送页面结果，避免启动竞态。
-
-### 3.2 `injected.js`
-
-- 使用页面登录态构造公共 Web 参数。
-- 实现 `GET_SELF_PROFILE`、`FETCH_LIKED_PAGE`、`FETCH_BOOKMARKED_PAGE`、`FETCH_AWEME_DETAIL`、`PRECHECK_URL` 和 `DOWNLOAD_TO_FOLDER`。
-- 收藏列表按表单 POST 发起。
-- 媒体下载尽量在页面上下文完成，以降低扩展 iframe 直接访问 CDN 的跨域失败率。
-
-### 3.3 `sidebar/app.js`
-
-- 绑定按钮、显示状态、记录北京时间日志。
-- 编排喜欢和收藏的“扫描一页、归一化、跳过、下载、持久化”循环。
-- 管理暂停、连续失败保险、账号隔离和继续下载入口。
-- 每个作品调用统一的 `downloadOne`；含图片或多个视频分段时进入 segmented 流程，普通单视频保留原路径。
-
-### 3.4 `liked-sync.js` 与 `bookmarked-sync.js`
-
-- 解析当前用户和预计总数。
-- 封装分页状态，防止 UI 层散落游标判断。
-- 将 API aweme 归一化为带 `mediaParts` 的本地 item，图文不再在同步层丢弃。
-- 只合并同一作用域的历史 item，避免喜欢和收藏互相继承下载状态。
-
-### 3.5 `shared/api.js`
-
-- 从 `images`、live-photo 嵌套视频和显式视频数组提取有序媒体分段。
-- 为每个视频分段汇集去重候选，并计算普通兼容排序和最高画质排序。
-- 根据图片/视频数量计算 `mediaType`。
-- 生成可写入日志的 codec、分辨率、fps、码率和大小描述。
-
-### 3.6 `shared/db.js`
-
-- 保存 `config`、`scopedItems`、`logs`、`runs` 和 `downloadJobs`。
-- DB v2 新增 `scopedItems`，主键为 `itemKey`。
-- 对外的 `getAll("items")`、`putItems` 和 `clearItems` 已透明切到 `scopedItems`。
-- 从 v1 升级时，把 legacy `items` 按作用域迁移到 `scopedItems`。
-
-### 3.7 `shared/download.js`
-
-- 保存和恢复 `FileSystemDirectoryHandle`。
-- 请求 `readwrite` 权限。
-- 创建子目录和文件，写入 Blob 或文本。
-- 仅在显式允许的兼容路径中使用浏览器 downloads；当前主下载入口要求文件夹优先。
-
-### 3.8 `download-record.js`
-
-- 从目标文件夹 `download-state.json` 恢复已完成作品和部分完成的媒体分段。
-- 匹配键是 `source + awemeId`。
-- 部分完成作品恢复为可继续状态，并保留 `downloadedMediaParts` 以跳过已完成段。
-
-## 4. 消息协议
-
-| 消息 | 方向 | 请求关键字段 | 返回关键字段 |
-| --- | --- | --- | --- |
-| `GET_SELF_PROFILE` | sidebar → page | 无 | user、状态码 |
-| `FETCH_LIKED_PAGE` | sidebar → page | secUid、maxCursor、minCursor、count | awemeList、hasMore、游标 |
-| `FETCH_BOOKMARKED_PAGE` | sidebar → page | cursor、count | awemeList、hasMore、cursor、total |
-| `FETCH_AWEME_DETAIL` | sidebar → page | awemeId | aweme、coverUrl |
-| `PRECHECK_URL` | sidebar → page | url、expected | HTTP、MIME、长度 |
-| `DOWNLOAD_TO_FOLDER` | sidebar → page | rootHandle、relativePath、url | 写入大小和校验结果 |
+- 打开侧边栏优先读取索引，不扫描媒体目录。
+- 旧目录没有索引时扫描一次并生成。
+- 每个作品成功完成后，在内存中立即更新当前作用域数量；文件写入与其他轻量状态合并延迟约 1.2 秒执行。
+- 下载失败不增加数量。
+- 索引丢失或 JSON 损坏时自动扫描重建。
+- 喜欢任务完整扫描成功后，用“本地喜欢 ID 集合 - 本轮平台可读取喜欢 ID 集合”计算 `likedArchived`。它表示已从喜欢列表消失但本地仍保留，可能包含作者删除、转私密、平台不可见或用户取消喜欢，不能仅凭列表接口进一步区分原因。
+- 增量边界只代表新作品检查完成；任务随后进入“核对留存”，完整分页成功后才覆盖 `likedCurrent`、`likedArchived` 和核对时间。暂停、接口异常或游标异常时保留上一次可信统计。
 
-消息必须携带 `requestId`。未知 type 返回错误；单个业务分支处理后立即 `return`，避免消息落入其他分支。
+完成索引应是数量缓存的唯一派生来源：同 scope 的计数等于 completed Set 大小；全库唯一数等于三个集合并集。多个文件必须记录同一代 generation 并在读取时校验；当前文件独立写入，没有此一致性协议。手动改动文件或后端写库后应提供显式核对，而不是使用 max 永久保留过高计数。
 
-## 5. 收藏分页状态机
+平台当前量、本地历史量、当前目标集合不是同一口径。待下载应按目标集合与该 scope 完成集合的差集计算；未完整核对时标记估算/未知。不同来源已有备份与对应来源副本完成也必须区分。
 
-状态字段：
+目录选择器必须运行在顶层扩展页面中，不能直接从抖音页面内嵌 iframe 调用。界面使用一个小型扩展弹窗承载系统目录选择器，避免切换到新的完整标签页。
 
-| 字段 | 含义 |
-| --- | --- |
-| cursor | 下一页请求游标 |
-| hasMore | API 的 `has_more` 布尔值 |
-| page | 已完成页数 |
-| checked | 已归一化的视频数量 |
-| rawChecked | API 返回的原始作品数量 |
-| expectedTotal | 用户资料或响应中的预计收藏数 |
-| seenIds | 本轮扫描内的 awemeId 去重集合 |
-| finished | 当前游标是否为终止形态 |
-| fullScan | 是否满足 `has_more=false && cursor=0` |
+## 状态文件
 
-```mermaid
-stateDiagram-v2
-    [*] --> Profile
-    Profile --> RequestPage: 账号已识别，cursor=0
-    RequestPage --> RetryWait: 请求失败且未到第 3 次
-    RetryWait --> RequestPage: 等待 7s / 14s
-    RequestPage --> Normalize: 返回 aweme_list
-    Normalize --> DownloadPending: 保存 scopedItems
-    DownloadPending --> RequestPage: cursor 非终止且未暂停
-    DownloadPending --> Completed: has_more=false 且 cursor=0
-    DownloadPending --> Paused: 用户请求暂停
-    Normalize --> Failed: 游标不前进或异常终止
-    RequestPage --> Failed: 连续 3 次失败
-```
+- `download-progress.json`：每个作品更新的小型实时检查点。
+- `download-index.json`：`scope + awemeId` 完成索引，继续下载时 O(1) 查询。
+- `download-state.json`：兼容旧版本的完整快照，只在安全暂停或任务完成时生成。
+- `download-counts.json`：首屏使用的本地数量。
+- `manifests/<作品ID>.json`：单作品媒体清单。
+- `backups/YYYY-MM-DD/download-metadata.json`：每日首次使用目录时创建的轻量索引、数量和账号绑定备份，不包含媒体文件和完整作品库。
 
-关键不变量：
+插件正常启动/续传使用轻量索引与进度，兼容路径仍可能读取完整快照；后端仍以完整 state/log 工作。生成完整快照必须保留旧元数据；当前正常任务传入的历史 items 为空，导出无法保证这一要求。
+索引、数量和进度共享延迟写入队列，相同路径保留最新内容，任务收尾尝试刷新。当前写入失败未回填队列，浏览器强关也不会保证执行 finally；不能承诺无损落盘。需要保留失败待写项、重试/显式报错和跨文件代次核对。
 
-- 每次新任务从 `cursor=0` 扫描。
-- `has_more` 不能单独决定结束；cursor 也必须可信。
-- `expectedTotal` 只用于展示和空响应保护，不用于提前截断。
-- `seenIds` 只在当前扫描有效；跨任务幂等由 `scopedItems` 和文件夹记录负责。
-- 页面最小间隔 3 秒，重试等待不替代该间隔。
+每日备份仅在当天首次下载任务触发，备份轻量元数据，不保证正在写入时的全库事务快照，也不能恢复媒体或全部历史描述。
 
-## 6. Item 状态模型
+## 下载流程
 
-```text
-itemKey = normalizeScope(source) + ":" + awemeId
-normalizeScope("favorite_api") = "liked"
-normalizeScope("bookmarked") = "bookmarked"
-```
+1. 复用已授权目录并校验账号。
+2. 读取数量索引和作品 ID 索引；必要时只做一次迁移扫描。
+3. 获取平台列表分页。
+4. 用 `scope + awemeId` 查询紧凑索引，已有文件标记完成并跳过。
+5. 获取必要的作品详情和最高质量候选。
+6. 流式写入；中断时保留已写字节和恢复信息。
+7. 写作品清单；实时进度、数量索引和作品 ID 索引进入合并写入队列。
+8. 每日首次使用该目录时备份轻量元数据；暂停、完成或异常收尾时刷新全部待写状态。
 
-同一作品可以有两条记录：
+一键当前串行调用分享点赞、喜欢、收藏、所选关注作者。目标规则：任一阶段未完整扫描、有未解决失败、暂停或取消时不得标记全量成功。当前依赖 phase 字符串，关注仅一个 batch、部分失败仍可能完成，不满足完整成功语义。应返回结构化任务结果，UI 只展示结果，不承担推断逻辑。
 
-```text
-liked:765...
-bookmarked:765...
-```
+## 性能原则
 
-两条记录可以有不同的 `downloadStatus`、路径、失败原因和更新时间。
+- 用户信息和收藏首页短时缓存，并合并并发请求。
+- UI 渲染调度合并，空闲时不高频刷新。
+- 完整状态使用紧凑 JSON，进度使用小型检查点。
+- 首屏不遍历数千媒体文件；只有索引缺失时重建。
+- 下载首页不读取完整 `download-state.json`，也不加载全部 IndexedDB 作品。
+- 完整作品库只在进入“喜欢转收藏”、展开关注作者范围或真正开始任务时按需加载。
+- Web Worker 只适合纯计算；目录句柄、DOM 更新和下载编排仍在主线程。当前瓶颈是大文件和全量数据库 I/O，因此优先采用轻量索引、延迟加载和批量检查点。
 
-| 字段 | 常见值 | 说明 |
-| --- | --- | --- |
-| source | liked、favorite_api、bookmarked、following | 数据来源 |
-| status | pending、favorited、already_favorited 等 | 收藏业务状态 |
-| downloadStatus | not_started、downloading、downloaded、failed | 下载状态 |
-| lastError | 文本 | 最后失败原因 |
-| downloadQualityLabel | 例如 h265 1440x2560 | 最终画质摘要 |
-| downloadVideoPath | 相对路径 | 目标目录中的视频路径 |
-| mediaType | video、multi_video、image、multi_image、mixed | 作品媒体类型 |
-| mediaParts | 有序数组 | 每段地址、角色、序号和视频候选 |
-| downloadedMediaParts | partId 映射 | 已完成段的路径、大小、MIME 和实际画质 |
-| downloadMediaPaths | 相对路径数组 | 图文或多段作品的全部内容路径 |
+关注当前先全量同步所选作者再下载，分页也有全量 IndexedDB 读取；这些不是已优化完毕的行为。后续拆分 archive repository、扫描器、下载执行器、任务编排和纯 UI。p95 须声明阶段、窗口和样本数；当前最多保留 2,000 个样本，不代表整个长任务全部数据，序列化基准不能替代资源实测。
 
-收藏列表归一化时强制 `source=bookmarked`、`status=already_favorited`、`collectStat=1`；只从已有 bookmarked 记录继承下载状态。
+## 本地库页面
 
-### 6.1 多媒体分段模型
+`本地库.html` 是只读浏览页面，不参与下载状态判断：
 
-`extractMediaParts(aweme)` 先按 API 顺序提取 `images[]`，再提取图片项的 live-photo 视频和显式视频数组。每段生成稳定 `partId`；去重只在相同 kind 与 URL 内进行。
+- 只嵌入展示需要的紧凑字段，不包含候选 URL、全部媒体分段和完整日志。
+- 首屏和翻页每次只创建 100 个作品节点，不把全部作品变成 DOM。
+- 支持作品 ID、作者、描述搜索，以及来源、状态、媒体类型筛选。
+- 当前顶部有全部、已下载、待下载、失败、喜欢、消失留存、收藏七项，且错误遗漏/归类关注来源；不能当作验收后的界面。
+- 详细诊断通过单作品 manifest 和显式日志导出查看，不再拖慢本地库打开速度。
 
-```text
-aweme -> mediaParts[] -> mediaType
-                    -> downloadedMediaParts[partId]
-                    -> manifest.parts / files.media
-```
+目标界面：首页显示本地唯一已完成、当前任务未完成/失败和更新时间；喜欢/收藏/关注各列来源数，并注明不能直接相加；留存核对独立展示时间与口径。列表默认本地已完成，作者和描述优先，支持打开本地文件；ID、画质、路径放详情。
 
-分段路径用两位以上序号保持排序。每完成一段就保存 IndexedDB 和轻量文件夹检查点；最终 manifest 和作品 `downloaded` 状态只在全部内容段齐全后写入。暂停错误使用独立标记穿过外层循环，因此不会增加失败计数。
-
-backend 直接导入共享解析函数，并使用相同 `partId`、候选排序与文件路径。两端的记录 schema 都允许保留未知扩展字段，保证同一备份目录可以交替续跑。
-
-## 7. 最高画质选择
-
-候选来源：
-
-1. `video.bit_rate[*].play_addr.url_list`。
-2. `video.play_addr_h264`。
-3. `video.play_addr_h265`。
-4. `video.play_addr`。
-
-去重键包含 URL、codec、分辨率、码率、大小和来源。
-
-最高画质排序：像素面积、码率、大小、fps、H.265 小幅加权、`qualityType`。普通模式先给 H.264 极高优先级，再比较相同画质字段。
-
-文件夹模式下载：
-
-1. 列表归一化时预先计算最高画质候选、普通兼容 fallback 和候选时间戳。
-2. 下载时若候选不超过 10 分钟，直接复用；缺失、过期或需补封面时才请求作品详情。
-3. 合并普通兼容 fallback，按 URL 去重。
-4. 最高画质最多尝试前 4 个候选；普通模式只尝试 1 个。
-5. 每个候选只 fetch 一次，在同一次响应中完成状态、MIME、长度和 Blob 校验，再写入目标路径。
-6. 成功后记录实际候选，而不是最初候选。
-7. 全部候选失败才把作品标记 `failed`。
-
-这套逻辑由 `downloadOne` 统一调用，liked 与 bookmarked 不得各自实现画质分支。
-
-## 8. 写盘与恢复
-
-### 8.1 写盘时机
-
-- 任务开始写 `download-state.json`。
-- 单条作品成功或失败后立即更新 `download-state.json`，保证断点可恢复。
-- HTML、五个汇总数据库和完整日志每 10 条或 30 秒刷新一次，避免每条重写全部资产。
-- 用户暂停、完整扫描结束和外层收尾时强制完整刷新。
-- `performance-summary.json` 在完整刷新及任务最终收尾时写入。
-
-媒体写入成功后，item 才更新为 `downloaded`。
-
-### 8.2 文件夹记录优先级
-
-继续下载 scope 的解析顺序：
-
-1. 已授权文件夹 `download-state.json` 的 `current.scope`。
-2. IndexedDB `config.lastDownloadScope`。
-3. 默认 `liked`。
-
-恢复时，用文件夹 `record.items` 与当前 `scopedItems` 做复合键匹配。文件夹记录属于其他 uid 时拒绝恢复和写入。
-
-### 8.3 为什么从第一页继续
-
-远端列表会新增、删除、重排，分页 cursor 也可能过期。保存 cursor 并从中间恢复可能漏掉新内容。因此继续下载使用“从第一页重新对账 + 本地 downloaded 幂等跳过”。
-
-## 9. 文件与数据契约
-### 8.4 性能可观测性
-
-`shared/performance.js` 保存当前任务的阶段样本并生成汇总。sidebar 只持有单个活动 tracker；任务结束后转为只读的最后汇总。
-
-核心阶段：
-
-- `profile_api`：官方喜欢/收藏总数请求。
-- `list_api`、`list_throttle_wait`、`list_retry_wait`：列表接口与主动限流。
-- `detail_api`、`download_candidates_reused`：详情请求与候选复用。
-- `video_request`、`video_transfer`、`video_write`：媒体首包、Blob 传输、文件写入。
-- `checkpoint_write`、`artifact_full_write`：轻量续跑状态与重型汇总资产。
-- `item_delay`、`ui_render`：条目间保护等待与 UI 开销。
-
-汇总按阶段输出 count、total、average、P50、P95、max、failures。传输阶段额外聚合 bytes 和 MB/s。按 total 排序的前五项是当前任务瓶颈；主动等待与网络耗时必须分开解释，不能把限流等待误判为网速。
-
-侧边栏首次打开先调用 `GET_SELF_PROFILE`。如果个人资料缺少收藏总数，再预取 `listcollection` 第一页并缓存复用；因此不会为了显示总数重复请求第一页。
-远端总数、已扫描数和已下载数是三个不同语义；响应没有总数字段时 UI 保持未知，不用递增扫描数冒充远端总数。
-
-
-
-`download-state.json` 至少包含：
-
-- `generatedAt`。
-- `likedTotal`、`bookmarkedTotal`。
-- `downloadedTotal`、`pendingTotal`、`failedTotal`。
-- `current.scope`、index、awemeId、resolution、phase、completed、total。
-- `items[]`，包含 source、downloadStatus、路径、画质和错误。
-
-`db_likes.json` 与 `db_bookmarked.json` 分开保存 ID 集合；`db_videos.json` 保存媒体路径和画质；`db_texts.json` 保存描述；`db_authors.json` 保存作者摘要。
-
-单条 manifest 当前只以 awemeId 命名，未包含 scope。未来若不同 scope 需要不同 manifest 内容，必须先升级路径契约或定义合并规则。
-
-## 10. 失败策略
-
-| 失败 | 当前处理 |
-| --- | --- |
-| 未登录或资料无账号标识 | 停止并显示登录态错误 |
-| 收藏页请求失败 | 最多 3 次，等待 7s / 14s |
-| 游标不前进 | 立即停止，记录 cursor |
-| 预计总数大于 0 但扫描为 0 | 停止，提示验证码或登录态 |
-| 图文或多段作品某一分段失败 | 保存已完成 `partId`，作品记失败或暂停；下次只重试未完成段 |
-| 媒体候选无 MP4 或为空 | 尝试下一候选，最终失败落盘 |
-| 文件夹权限失效 | 请求权限；仍失败则停止 |
-| 文件夹账号不匹配 | 停止，要求选择新目录 |
-| 连续 8 个作品下载失败 | 熔断停止 |
-| 用户暂停 | 安全点保存后返回 |
-
-## 11. 扩展规则
-
-- 新列表来源必须新增明确 scope，不能复用 liked 键空间。
-- 新分页协议必须放入独立 sync 模块并有纯状态机测试。
-- 新媒体来源必须进入 `pickVideoCandidates`，不能绕开统一排序和日志。
-- 改变文件路径或 `download-state` 字段必须说明兼容和迁移。
-- API 变更必须同步更新 `injected.js`、运行时测试和访问面文档。
-- 所有新入口必须定义继续、暂停、账号隔离和空响应语义。
+展示必须聚合同 ID 的多来源关系，用完成索引覆盖历史总量、用完整元数据补充列表；元数据缺失显示未知，不把历史作品遗漏。只保留一个明确主入口；历史副本需经确认再处理。本次未实现该界面改造。

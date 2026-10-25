@@ -85,6 +85,7 @@ export function summarizePerformance(tracker, {
       averageMs: rounded(totalMs / Math.max(samples.length, 1)),
       p50Ms: rounded(percentile(durations, 0.5)),
       p95Ms: rounded(percentile(durations, 0.95)),
+      p99Ms: rounded(percentile(durations, 0.99)),
       maxMs: rounded(durations.at(-1) || 0),
       bytes,
       megabytesPerSecond: totalMs > 0 && bytes > 0
@@ -117,7 +118,13 @@ export function formatPerformanceSummary(summary) {
   if (!summary) return "";
   const top = (summary.bottlenecks || [])
     .slice(0, 4)
-    .map((entry) => entry.stage + "=" + (entry.totalMs / 1000).toFixed(1) + "s")
+    .map((entry) => {
+      const metrics = summary.stages?.[entry.stage] || {};
+      return entry.stage
+        + "=" + (entry.totalMs / 1000).toFixed(1) + "s"
+        + " (p95 " + Number(metrics.p95Ms || 0).toFixed(0) + "ms"
+        + ", p99 " + Number(metrics.p99Ms || 0).toFixed(0) + "ms)";
+    })
     .join(" | ");
   return "total=" + (Number(summary.wallMs || 0) / 1000).toFixed(1) + "s"
     + (top ? " | " + top : "");

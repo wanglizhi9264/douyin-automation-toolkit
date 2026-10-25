@@ -31,6 +31,7 @@ assert.equal(summary.stages.list_api.count, 2);
 assert.equal(summary.stages.list_api.totalMs, 400);
 assert.equal(summary.stages.list_api.p50Ms, 100);
 assert.equal(summary.stages.list_api.p95Ms, 300);
+assert.equal(summary.stages.list_api.p99Ms, 300);
 assert.equal(summary.stages.media_transfer.bytes, 2 * 1024 * 1024);
 assert.equal(summary.stages.media_transfer.megabytesPerSecond, 2);
 assert.equal(summary.stages.checkpoint.failures, 1);
@@ -48,7 +49,9 @@ const sidebarSource = fs.readFileSync(new URL("../src/sidebar/app.js", import.me
 assert.match(sidebarSource, /requestSelfProfile\(\{ reason: "sidebar_summary" \}\)/);
 assert.match(sidebarSource, /download_candidates_reused/);
 assert.match(sidebarSource, /CANDIDATE_CACHE_MAX_AGE_MS/);
-assert.match(sidebarSource, /FULL_ARTIFACT_EVERY_ITEMS/);
+assert.match(sidebarSource, /const shouldWriteState = forceFull/);
+assert.match(sidebarSource, /download-index\.json/);
+assert.match(sidebarSource, /progress_checkpoint_write/);
 assert.match(sidebarSource, /\{ itemCompleted: true \}/);
 assert.match(sidebarSource, /\{ forceFull: true \}/);
 assert.match(sidebarSource, /performance-summary\.json/);
