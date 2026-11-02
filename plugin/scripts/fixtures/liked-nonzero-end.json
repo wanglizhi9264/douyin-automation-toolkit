@@ -1,0 +1,102 @@
+{
+  "description": "Observed nonzero end-page response shape on 2026-10-28; work IDs are synthetic.",
+  "input": {
+    "maxCursor": 1783556134000,
+    "minCursor": 0
+  },
+  "response": {
+    "ok": true,
+    "httpStatus": 200,
+    "statusCode": 0,
+    "hasMore": false,
+    "maxCursor": 1783511616000,
+    "minCursor": 0,
+    "awemeList": [
+      {
+        "aweme_id": "9900001"
+      },
+      {
+        "aweme_id": "9900002"
+      },
+      {
+        "aweme_id": "9900003"
+      },
+      {
+        "aweme_id": "9900004"
+      },
+      {
+        "aweme_id": "9900005"
+      },
+      {
+        "aweme_id": "9900006"
+      },
+      {
+        "aweme_id": "9900007"
+      },
+      {
+        "aweme_id": "9900008"
+      },
+      {
+        "aweme_id": "9900009"
+      },
+      {
+        "aweme_id": "9900010"
+      },
+      {
+        "aweme_id": "9900011"
+      },
+      {
+        "aweme_id": "9900012"
+      },
+      {
+        "aweme_id": "9900013"
+      }
+    ],
+    "json": {
+      "status_code": 0,
+      "has_more": 0,
+      "max_cursor": 1783511616000,
+      "aweme_list": [
+        {
+          "aweme_id": "9900001"
+        },
+        {
+          "aweme_id": "9900002"
+        },
+        {
+          "aweme_id": "9900003"
+        },
+        {
+          "aweme_id": "9900004"
+        },
+        {
+          "aweme_id": "9900005"
+        },
+        {
+          "aweme_id": "9900006"
+        },
+        {
+          "aweme_id": "9900007"
+        },
+        {
+          "aweme_id": "9900008"
+        },
+        {
+          "aweme_id": "9900009"
+        },
+        {
+          "aweme_id": "9900010"
+        },
+        {
+          "aweme_id": "9900011"
+        },
+        {
+          "aweme_id": "9900012"
+        },
+        {
+          "aweme_id": "9900013"
+        }
+      ]
+    }
+  }
+}

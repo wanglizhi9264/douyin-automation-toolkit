@@ -1,75 +1,79 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>抖音收藏备份助手</title>
-  <link rel="stylesheet" href="./style.css" />
-</head>
-<body>
-  <main class="app">
-    <header class="header">
-      <div class="title-row">
-        <div class="title-stack"><h1>抖音备份</h1><span id="runtimeStatus" class="status">加载中</span></div>
-        <div class="window-actions"><button id="collapseBtn" class="close-button collapse-button" type="button" aria-label="收起面板">‹</button><button id="closeBtn" class="close-button" type="button" aria-label="关闭面板">×</button></div>
-      </div>
-      <div id="pageMeta" class="meta header-meta">等待抖音页面连接</div>
-      <nav class="main-tabs" aria-label="主要功能"><button id="downloadTabBtn" class="main-tab active" type="button">下载</button><button id="favoriteTabBtn" class="main-tab" type="button">喜欢转收藏</button></nav>
-    </header>
-
-    <section class="content">
-      <div id="downloadView">
-        <section class="panel target-panel">
-          <div class="section-head horizontal compact-head">
-            <div><div class="eyebrow">保存位置</div><div id="downloadTargetMeta" class="target-summary">尚未选择文件夹</div></div>
-            <button id="pickFolderBtn" class="button small-button" type="button">更换</button>
-          </div>
-          <div class="target-actions"><button id="continueDownloadBtn" class="button primary" type="button">继续上次下载</button><button id="pauseDownloadBtn" class="button" type="button" disabled>暂停</button></div>
-        </section>
-
-        <section class="panel hero-panel">
-          <div class="section-head horizontal compact-head"><div><h2>下载内容</h2><div id="remoteSummaryMeta" class="meta">正在读取数量…</div></div><span id="downloadRuntimeStatus" class="status">空闲</span></div>
-          <div class="download-scope-cards">
-            <button id="downloadBtn" class="scope-card scope-liked" type="button"><span class="scope-icon">♥</span><span class="scope-title">喜欢</span><span class="scope-counts"><b id="likedSummaryCount">-</b><small>当前总数</small></span><span class="scope-local">本地 <strong id="likedLocalDownloadedCount">0</strong> · 消失留存 <strong id="likedArchivedLocalCount">0</strong></span><span class="scope-pending">待下载 <strong id="likedLocalPendingCount">-</strong></span></button>
-            <button id="downloadBookmarkedBtn" class="scope-card scope-bookmarked" type="button"><span class="scope-icon">★</span><span class="scope-title">收藏</span><span class="scope-counts"><b id="bookmarkedSummaryCount">-</b><small>总数</small></span><span class="scope-local">本地 <strong id="bookmarkedLocalDownloadedCount">0</strong></span><span class="scope-pending">待下载 <strong id="bookmarkedLocalPendingCount">-</strong></span></button>
-            <button id="downloadFollowingBtn" class="scope-card scope-following" type="button"><span class="scope-icon">◎</span><span class="scope-title">关注作者</span><span class="scope-counts"><b id="followingSummaryCount">0</b><small>作品</small></span><span class="scope-local">本地 <strong id="followingLocalDownloadedCount">0</strong></span><span class="scope-pending">待下载 <strong id="followingLocalPendingCount">0</strong></span></button>
-          </div>
-          <div class="one-click-block">
-            <div><strong>一键完整备份</strong><div id="oneClickMeta" class="meta">私信“王立志”分享点赞 → 喜欢 → 收藏 → 所选关注作者</div></div>
-            <button id="oneClickBackupBtn" class="button primary" type="button">开始一键备份</button>
-          </div>
-        </section>
-
-        <section id="downloadTaskView" class="panel task-panel">
-          <div class="section-head horizontal compact-head"><div><span id="downloadTaskScopeStatus" class="eyebrow">当前任务</span><h2 id="downloadTaskTitle" class="task-title">下载任务</h2></div><button id="pauseDownloadTaskBtn" class="button small-button" type="button" disabled>暂停</button></div>
-          <div class="task-numbers"><div><span>任务</span><strong id="downloadTaskScope">-</strong></div><div><span>已完成</span><strong><i id="downloadTaskCompleted">0</i> / <i id="downloadTaskTotal">0</i></strong></div><div><span>已检查</span><strong id="downloadTaskChecked">-</strong></div></div>
-          <div id="downloadTaskProgress" class="task-progress">尚未开始下载</div>
-          <div class="current-item"><span id="downloadTaskPhase">空闲</span><span id="downloadTaskCursor">-</span><span id="downloadTaskResolution">-</span></div>
-          <div class="task-actions"><button id="restartCurrentDownloadBtn" class="button" type="button">重新开始当前任务</button><button id="backToHomeBtn" class="button hidden" type="button">返回</button></div>
-        </section>
-
-        <details class="panel options-panel"><summary>下载设置</summary><div class="advanced-content"><label class="checkline"><input id="downloadCovers" type="checkbox" checked />下载封面</label><label class="checkline"><input id="downloadPreferBestQuality" type="checkbox" checked />优先最高画质</label><label class="checkline"><input id="syncLikedBeforeRun" type="checkbox" />开始前刷新喜欢列表</label><label class="checkline"><input id="downloadUseSavedFolder" type="checkbox" checked />自动使用当前文件夹</label></div></details>
-
-        <details id="followingOptionsPanel" class="panel options-panel"><summary>关注作者范围</summary><div class="advanced-content"><div class="section-head horizontal"><span id="followingSelectionStatus" class="status">未选择</span><div class="buttons compact"><button id="refreshFollowingBtn" class="button">刷新</button><button id="selectAllFollowingBtn" class="button">全选</button><button id="clearFollowingSelectionBtn" class="button">清空</button></div></div><div id="followingSelectionMeta" class="meta">展开后从抖音同步关注作者，请至少选择一位。</div><div id="followingAuthorList" class="selection-list"></div></div></details>
-      </div>
-
-      <div id="favoriteView" class="hidden">
-        <section class="panel hero-panel favorite-hero">
-          <div class="section-head horizontal compact-head"><div><h2>喜欢转收藏</h2><div class="meta">把喜欢作品加入收藏，支持断点继续。</div></div><span id="favoriteRuntimeStatus" class="status">空闲</span></div>
-          <div class="grid"><div class="stat"><div class="stat-label">喜欢</div><div id="totalCount" class="stat-value">0</div></div><div class="stat"><div class="stat-label">已收藏</div><div id="successCount" class="stat-value">0</div></div><div class="stat"><div class="stat-label">待处理</div><div id="pendingCount" class="stat-value">0</div></div><div class="stat"><div class="stat-label">暂停/阻塞</div><div id="pausedCount" class="stat-value">0</div></div></div>
-          <div class="favorite-actions"><button id="favoriteBtn" class="button primary">开始 / 继续</button><button id="auditBtn" class="button">审计最近记录</button><button id="stopBtn" class="button" disabled>停止</button></div>
-          <div id="favoriteCursorBox" class="task-progress">尚无数据</div><div class="meta-block"><span class="meta-label">审计返工</span> <strong id="auditPendingCount">0</strong></div>
-        </section>
-      </div>
-
-      <div class="hidden" aria-hidden="true">
-        <input id="batchSize" type="number" min="1" value="100" /><input id="auditRecent" type="number" min="0" value="120" /><input id="minDelayMs" type="number" min="0" value="300" /><input id="maxDelayMs" type="number" min="0" value="900" />
-        <button id="profileBtn"></button><button id="importBtn"></button><button id="exportLogsBtn"></button><button id="exportTaskLogsBtn"></button><input id="importFile" type="file" accept="application/json,.json" />
-        <div id="latestLog"></div><div id="log"></div><div id="downloadTaskLatestLog"></div><div id="downloadTaskLog"></div><div id="downloadBatchProgress"></div><div id="downloadSummaryCursor">-</div><div id="downloadSummaryResolution">-</div><div id="likedSummaryCursor">-</div>
-        <div id="downloadEligibleCount">0</div><div id="downloadedCount">0</div><div id="downloadPendingCount">0</div><div id="downloadFailedCount">0</div><div id="performanceSummary"></div><div id="downloadTaskPerformanceSummary"></div><div id="downloadCursorBox"></div><div id="downloadTaskTargetMeta"></div><div id="downloadTaskCursorBox"></div>
-      </div>
-    </section>
-  </main>
-  <script type="module" src="./app.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>抖音备份</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body class="collapsed">
+    <div id="floatingDock">
+      <nav id="quickMenu" aria-label="快捷下载" hidden>
+        <button data-quick="liked" title="下载喜欢" aria-label="下载喜欢">
+          喜欢
+        </button>
+        <button data-quick="bookmarked" title="下载收藏" aria-label="下载收藏">
+          收藏
+        </button>
+        <button
+          data-quick="following"
+          title="选择关注作者"
+          aria-label="选择关注作者"
+        >
+          关注
+        </button>
+      </nav>
+      <button
+        id="floating"
+        title="展开抖音备份"
+        aria-label="展开抖音备份"
+        aria-expanded="false"
+        aria-controls="quickMenu"
+      >
+        <svg
+          id="floatingProgress"
+          viewBox="0 0 60 60"
+          aria-hidden="true"
+          hidden
+        >
+          <circle class="ring-track" cx="30" cy="30" r="28" />
+          <circle id="floatingArc" cx="30" cy="30" r="28" pathLength="100" />
+        </svg>
+        <img src="../icons/archive.svg" alt="" /><span
+          id="runningDot"
+          hidden
+        ></span>
+      </button>
+      <button id="floatingClose" aria-label="关闭插件" title="关闭并暂停下载">
+        ×
+      </button>
+    </div>
+    <div id="shell">
+      <header>
+        <div class="brand">
+          <img src="../icons/archive.svg" alt="" /><span>抖音备份</span>
+        </div>
+        <div class="window-actions">
+          <button id="menuBtn" aria-label="更多操作" title="更多操作">
+            ···</button
+          ><button
+            id="collapseBtn"
+            aria-label="最小化"
+            title="最小化，下载继续"
+          >
+            −</button
+          ><button id="closeBtn" aria-label="关闭插件" title="关闭并暂停下载">
+            ×
+          </button>
+        </div>
+      </header>
+      <main id="view" aria-live="polite"></main>
+      <div id="notice" role="status" hidden></div>
+      <footer>
+        <span id="account">本地备份 · v0.8.4</span
+        ><span id="footState"></span>
+      </footer>
+    </div>
+    <script type="module" src="./modern-app.js"></script>
+  </body>
 </html>

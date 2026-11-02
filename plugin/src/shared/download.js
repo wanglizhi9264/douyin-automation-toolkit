@@ -1,4 +1,5 @@
 import { getConfig, setConfig } from "./db.js";
+import { httpError } from './http.js';
 
 function canUseBrowserDownloads() {
   return Boolean(
@@ -225,11 +226,17 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
   expected = "video",
   headerTimeoutMs = 30000,
   totalTimeoutMs = 120000,
+  signal,
+  onProgress,
+  resumeIdentity,
 } = {}) {
   if (target?.kind !== "filesystem" || !target.handle) {
     throw new Error("\u5a92\u4f53\u6587\u4ef6\u5fc5\u987b\u5199\u5165\u5df2\u6388\u6743\u6587\u4ef6\u5939");
   }
   const controller = new AbortController();
+  const stop = () => controller.abort();
+  if(signal?.aborted)throw new DOMException('任务已暂停','AbortError');
+  signal?.addEventListener('abort',stop,{once:true});
   const timingNow = () => globalThis.performance?.now?.() ?? Date.now();
   const startedAt = timingNow();
   let phase = "request";
@@ -242,7 +249,7 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     try {
       resumeKey = JSON.parse(await readTextFile(target, resumeStatePath))?.key || "";
     } catch {}
-    const expectedResumeKey = mediaResumeKey(url);
+    const expectedResumeKey = resumeIdentity || mediaResumeKey(url);
     let existingSize = (await file.getFile()).size;
     if (existingSize > 0 && resumeKey !== expectedResumeKey) {
       const reset = await file.createWritable();
@@ -271,10 +278,11 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     const contentLength = Number(response.headers.get("content-length") || 0);
     const acceptRanges = response.headers.get("accept-ranges") || "";
     if (response.status < 200 || response.status >= 300) {
-      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1aHTTP " + response.status);
+      throw httpError(response.status, response.headers.get('retry-after'), "媒体请求失败：HTTP " + response.status);
     }
     const contentRange = response.headers.get("content-range") || "";
     const rangeMatch = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+    if(response.status===206&&(!rangeMatch||Number(rangeMatch[1])!==existingSize||Number(rangeMatch[2])+1!==Number(rangeMatch[3])))throw new Error('媒体请求失败：Range 响应不完整');
     const resumed = existingSize > 0 && response.status === 206;
     if (resumed && (!rangeMatch || Number(rangeMatch[1]) !== existingSize)) {
       throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1aRange \u8d77\u70b9\u4e0e\u672c\u5730\u6587\u4ef6\u4e0d\u4e00\u81f4");
@@ -294,15 +302,15 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     }
     const received = await streamResponseToFile(file, response, {
       offset: writeOffset,
-      onChunk: armStallTimeout,
+      onChunk: received => {armStallTimeout();onProgress?.({loaded:writeOffset+received,total:expectedTotal});if(signal?.aborted)throw new DOMException('任务已暂停','AbortError');},
     });
     const downloadedAt = timingNow();
     const finalSize = writeOffset + received;
     if (!received && !writeOffset) {
-      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a0 \u5b57\u8282");
+      throw Object.assign(new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a0 \u5b57\u8282"), { retryable: true });
     }
     if (expectedTotal && finalSize !== expectedTotal) {
-      throw new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u5927\u5c0f\u4e0d\u4e00\u81f4 " + finalSize + "/" + expectedTotal);
+      throw Object.assign(new Error("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25\uff1a\u5927\u5c0f\u4e0d\u4e00\u81f4 " + finalSize + "/" + expectedTotal), { retryable: true });
     }
     phase = "write";
     const writtenAt = timingNow();
@@ -330,11 +338,13 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     };
   } catch (error) {
     controller.abort();
+    if(signal?.aborted)throw new DOMException('任务已暂停','AbortError');
+    if(['QuotaExceededError','NotAllowedError','NotReadableError','SecurityError','NoModificationAllowedError'].includes(error?.name))throw error;
     if (error?.name === "AbortError") {
       if (timeoutReason === "header") {
-        throw new Error("\u7b49\u5f85\u5a92\u4f53\u54cd\u5e94\u8d85\u8fc7 " + Math.round(headerTimeoutMs / 1000) + " \u79d2");
+        throw Object.assign(new Error("\u7b49\u5f85\u5a92\u4f53\u54cd\u5e94\u8d85\u8fc7 " + Math.round(headerTimeoutMs / 1000) + " \u79d2"), { retryable: true });
       }
-      throw new Error("\u5a92\u4f53\u4e0b\u8f7d\u8fde\u7eed " + Math.round(totalTimeoutMs / 1000) + " \u79d2\u672a\u6536\u5230\u6570\u636e");
+      throw Object.assign(new Error("\u5a92\u4f53\u4e0b\u8f7d\u8fde\u7eed " + Math.round(totalTimeoutMs / 1000) + " \u79d2\u672a\u6536\u5230\u6570\u636e"), { retryable: true });
     }
     const message = error?.message || String(error);
     if (message.startsWith("\u5a92\u4f53\u8bf7\u6c42\u5931\u8d25")) throw error;
@@ -348,6 +358,7 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     throw new Error("\u6269\u5c55\u6293\u53d6\u5931\u8d25(" + host + ")\uff1a" + message);
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener('abort',stop);
   }
 }
 

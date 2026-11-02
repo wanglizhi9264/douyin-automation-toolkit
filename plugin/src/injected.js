@@ -27,12 +27,14 @@ async function fetchJson(url, options = {}) {
     return {
       ok: false,
       httpStatus: response.status,
+      retryAfter: response.headers?.get?.('retry-after') || null,
       text: text.slice(0, 500),
     };
   }
   return {
     ok: response.ok && (json.status_code == null || json.status_code === 0),
     httpStatus: response.status,
+    retryAfter: response.headers?.get?.('retry-after') || null,
     statusCode: json.status_code,
     statusMsg: json.status_msg,
     json,
@@ -95,6 +97,18 @@ async function getSelfProfile() {
   params.set("publish_video_strategy_type", "2");
   params.set("source", "channel_pc_web");
   const result = await fetchJson(`/aweme/v1/web/user/profile/self/?${params}`);
+  // "我的收藏" belongs to the signed-in navigation. Keep abbreviated counts
+  // as display text; 1.3万 must never become a fabricated exact 13000.
+  if (result.ok && document.querySelectorAll) {
+    for (const el of document.querySelectorAll("a,button,span")) {
+      const text=(el.textContent||"").replace(/\s/g,"");
+      const match=text.match(/^我的收藏([\d,]+(?:\.\d+)?)(万|亿|w)?$/i);
+      if (!match) continue;
+      if (match[2]) result.bookmarkedDisplay="约"+match[1]+match[2];
+      else if (/^[\d,]+$/.test(match[1])) result.bookmarkedCount=Number(match[1].replaceAll(",",""));
+      break;
+    }
+  }
   return result;
 }
 
@@ -711,13 +725,14 @@ async function fetchFollowingPage(userId, secUid, offset = 0, count = 20, maxTim
   params.set("max_time", String(maxTime || 0));
   params.set("min_time", String(minTime || 0));
   const result = await fetchJson(`/aweme/v1/web/user/following/list/?${params}`);
-  const users = result.json?.followings || result.json?.user_list || result.json?.users || [];
+  const users = result.json?.followings ?? result.json?.user_list ?? result.json?.users;
+  const rawMore = result.json?.has_more ?? result.json?.hasMore;
   return {
     ...result,
     ok: result.ok && Array.isArray(users),
-    users,
-    hasMore: asBoolean(result.json?.has_more ?? result.json?.hasMore),
-    offset: Number(result.json?.offset ?? (Number(offset || 0) + users.length)),
+    users: Array.isArray(users) ? users : [],
+    hasMore: [true, false, 0, 1, "0", "1"].includes(rawMore) ? asBoolean(rawMore) : null,
+    offset: Number(result.json?.offset ?? (Number(offset || 0) + (users?.length || 0))),
     maxTime: result.json?.max_time ?? maxTime,
     minTime: result.json?.min_time ?? minTime,
     total: Number(result.json?.total ?? result.json?.mix_count ?? 0) || 0,

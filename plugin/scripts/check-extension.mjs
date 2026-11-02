@@ -10,6 +10,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function collectManifestPaths(manifest) {
   const paths = [];
   if (manifest.background?.service_worker) paths.push(manifest.background.service_worker);
+  paths.push(...Object.values(manifest.icons||{}),...Object.values(manifest.action?.default_icon||{}));
   for (const script of manifest.content_scripts || []) {
     paths.push(...(script.js || []), ...(script.css || []));
   }
@@ -27,6 +28,7 @@ const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"))
 const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 
 if (manifest.manifest_version !== 3) throw new Error("manifest_version must be 3");
+if (manifest.version !== packageJson.version) throw new Error("manifest/package version mismatch");
 if (!packageJson.scripts?.check) throw new Error("package.json missing check script");
 
 const referencedPaths = collectManifestPaths(manifest);

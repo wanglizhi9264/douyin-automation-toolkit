@@ -120,6 +120,15 @@ await onMessage({
 const profileReply = replies.find((entry) => entry.message.requestId === "profile-1");
 assert.equal(profileReply.message.payload.ok, true);
 assert.equal(profileReply.message.payload.json.user.sec_uid, "sec-test");
+globalThis.document.querySelectorAll = () => [{textContent:"我的收藏1.3万"}];
+const approximateProfile=await getSelfProfile();
+assert.equal(approximateProfile.bookmarkedDisplay,"约1.3万");
+assert.equal(approximateProfile.bookmarkedCount,undefined,"abbreviated display is never a fake exact number");
+globalThis.document.querySelectorAll=()=>[{textContent:"我的收藏12,345"}];
+assert.equal((await getSelfProfile()).bookmarkedCount,12345);
+globalThis.document.querySelectorAll=()=>[{textContent:"收藏作品 12345"}];
+assert.equal((await getSelfProfile()).bookmarkedCount,undefined,"unrelated content cannot set account totals");
+
 
 await onMessage({
   source: globalThis.window,

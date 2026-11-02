@@ -3,7 +3,7 @@ import fs from "node:fs";
 
 const injected = fs.readFileSync(new URL("../src/injected.js", import.meta.url), "utf8");
 const sidebar = fs.readFileSync(new URL("../src/sidebar/app.js", import.meta.url), "utf8");
-const html = fs.readFileSync(new URL("../src/sidebar/index.html", import.meta.url), "utf8");
+const html = fs.readFileSync(new URL("../src/sidebar/legacy.html", import.meta.url), "utf8");
 
 function sourceFunction(source, name) {
   const start = source.indexOf(`function ${name}(`);

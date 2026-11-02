@@ -1,10 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "抖音收藏备份助手",
-  "version": "0.6.2",
-  "description": "本地管理抖音喜欢列表收藏、审计和视频备份。",
+  "name": "抖音备份",
+  "version": "0.8.4",
+  "description": "将喜欢、收藏和所选关注作者的作品备份到本地文件夹，支持并行下载、断点继续和闲时整理。",
   "action": {
-    "default_title": "抖音收藏备份助手"
+    "default_title": "抖音备份",
+    "default_icon": {
+      "16": "src/icons/archive-16.png",
+      "32": "src/icons/archive-32.png",
+      "48": "src/icons/archive-48.png"
+    }
   },
   "background": {
     "service_worker": "src/background.js"
@@ -53,7 +58,6 @@
         "src/injected.js",
         "src/content.css",
         "src/sidebar/index.html",
-        "src/sidebar/app.js",
         "src/sidebar/style.css",
         "src/shared/report.js",
         "src/folder-picker/index.html",
@@ -67,8 +71,34 @@
         "src/shared/download-record.js",
         "src/shared/download-index.js",
         "src/shared/performance.js",
-        "src/shared/events.js"
+        "src/shared/events.js",
+        "src/core/media.js",
+        "src/core/engine.js",
+        "src/core/sources.js",
+        "src/core/model.js",
+        "src/archive/repository.js",
+        "src/archive/fs.js",
+        "src/archive/layout.js",
+        "src/archive/naming.js",
+        "src/maintenance/hash-worker.js",
+        "src/maintenance/organize.js",
+        "src/maintenance/author-folders.js",
+        "src/maintenance/names.js",
+        "src/icons/archive.svg",
+        "src/sidebar/modern-app.js",
+        "src/core/progress.js",
+        "src/shared/http.js",
+        "src/core/retry.js",
+        "src/archive/report.js",
+        "src/core/pagination.js",
+        "src/maintenance/measure.js"
       ]
     }
-  ]
+  ],
+  "icons": {
+    "16": "src/icons/archive-16.png",
+    "32": "src/icons/archive-32.png",
+    "48": "src/icons/archive-48.png",
+    "128": "src/icons/archive-128.png"
+  }
 }

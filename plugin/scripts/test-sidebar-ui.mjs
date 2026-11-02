@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-const html = fs.readFileSync(new URL("../src/sidebar/index.html", import.meta.url), "utf8");
+const html = fs.readFileSync(new URL("../src/sidebar/legacy.html", import.meta.url), "utf8");
 const app = fs.readFileSync(new URL("../src/sidebar/app.js", import.meta.url), "utf8");
 
 const htmlIds = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);

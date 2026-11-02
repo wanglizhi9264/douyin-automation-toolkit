@@ -17,7 +17,7 @@ await mkdir(folder);
 // Allowlist only runtime resources and standalone instructions. Never copy the
 // repository, browser profiles, diagnostics, node_modules or download archives.
 await cp(join(root, "manifest.json"), join(folder, "manifest.json"));
-await cp(join(root, "src"), join(folder, "src"), { recursive: true });
+await cp(join(root, "src"), join(folder, "src"), { recursive: true, filter: source => !["app.js", "legacy.html", "legacy-style.css"].some(name => source === join(root, "src/sidebar", name)) });
 await cp(join(root, "INSTALL.md"), join(folder, "安装说明.md"));
 const outputPath = join(buildDir, `${basename(folder)}.zip`);
 if (process.platform === "win32") {

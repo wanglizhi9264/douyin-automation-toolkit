@@ -29,13 +29,12 @@ assert.equal(await resolveDownloadTargetRecord(null), null);
 
 const pickerSource = fs.readFileSync(new URL("../src/folder-picker/app.js", import.meta.url), "utf8");
 const backgroundSource = fs.readFileSync(new URL("../src/background.js", import.meta.url), "utf8");
-assert.match(pickerSource, /startIn: stored\?\.handle \|\| "videos"/);
-assert.match(pickerSource, /getDirectoryHandle\("data", \{ create: true \}\)/);
-assert.match(pickerSource, /getDirectoryHandle\("\.appdata", \{ create: true \}\)/);
-assert.match(pickerSource, /download-state\.json/);
-assert.match(pickerSource, /window\.confirm/);
-assert.match(pickerSource, /download_target_resume_selected/);
-assert.match(pickerSource, /download_target_new_selected/);
+assert.match(pickerSource, /startIn:\s*stored\?\.handle\s*\|\|\s*["']videos["']/);
+assert.match(pickerSource, /await inspectFolder\(handle\)/);
+assert.match(pickerSource, /await repo\.initialize\(\)/);
+assert.doesNotMatch(pickerSource, /window\.confirm/);
+assert.match(pickerSource, /navigator\.locks\.request/);
+assert.match(pickerSource, /await rememberDownloadTarget\(handle/);
 assert.match(backgroundSource, /pickerUrl\.searchParams\.set\("returnTabId"/);
 assert.match(backgroundSource, /chrome\.windows\.create/);
 assert.doesNotMatch(backgroundSource, /chrome\.tabs\.create\(\{ url: pickerUrl\.toString\(\) \}/);
@@ -159,6 +158,12 @@ try {
     [...writtenFiles.get("data/\u70b9\u8d5e/\u89c6\u9891/resume.mp4").bytes],
     [0, 0, 0, 24, 102, 116, 121, 112],
   );
+  globalThis.fetch=async()=>new Response('rate limited',{status:429,headers:{'retry-after':'90'}});
+  await assert.rejects(()=>downloadVerifiedMedia({kind:'filesystem',handle:createDirectory()},'data/rate-limited.mp4','https://video.example/rate.mp4'),error=>error.httpStatus===429&&error.retryAfter==='90');
+  globalThis.fetch=async()=>new Response(new Uint8Array([1,2,3]),{headers:{"content-type":"video/mp4","content-length":"8"}});
+  await assert.rejects(()=>downloadVerifiedMedia({kind:'filesystem',handle:createDirectory()},'data/short.mp4','https://video.example/short.mp4'),error=>error.retryable===true);
+  globalThis.fetch=async(_url,init)=>new Promise((_resolve,reject)=>init.signal.addEventListener('abort',()=>reject(new DOMException('timed out','AbortError')),{once:true}));
+  await assert.rejects(()=>downloadVerifiedMedia({kind:'filesystem',handle:createDirectory()},'data/timeout.mp4','https://video.example/timeout.mp4',{headerTimeoutMs:5}),error=>error.retryable===true);
 } finally {
   globalThis.fetch = originalFetch;
 }
