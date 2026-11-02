@@ -73,8 +73,11 @@ export class Engine {
           this.sources.retry?.restore(
             resume && this.repo.state.tasks[resume.id]?.retryState,
           );
+          const restoredTask = resume && this.repo.state.tasks[resume.id];
+          for (const info of Object.values(restoredTask?.cooldowns || {}))
+            this.sources.retry?.restore(info);
           this.sources.onRetry = async (info) => {
-            if (this.task && this.repo.state.tasks[this.task.id])
+            if (info.scope !== "local" && this.task && this.repo.state.tasks[this.task.id])
               await this.update({ retryState: info });
           };
           const profile = await this.sources.profile(this.controller.signal);
@@ -121,6 +124,7 @@ export class Engine {
             savedTask?.id || this.repo.latestTask(scope)?.id || null;
           this.task.baselineSaved = this.repo.stats.sources[scope] || 0;
           this.task.retryState = savedTask?.retryState || null;
+          this.task.cooldowns = { ...(savedTask?.cooldowns || {}) };
           await this.repo.commit({ tasks: [this.task] });
           this.queue = [];
           this.raw = new Map();
@@ -534,15 +538,18 @@ export class Engine {
                         ...progress,
                       });
                       this.emit("progress");
-                      if (progress.retry)
-                        await this.update({ retryState: progress.retry }, [
-                          {
-                            ...item,
-                            state: "retry_wait",
-                            retryAt: progress.retry.until,
-                            retryAttempt: progress.retry.attempt,
-                          },
-                        ]);
+                      if (progress.retry) {
+                        const info = progress.retry;
+                        item = { ...item, state: "retry_wait", retryAt: info.until,
+                          retryAttempt: info.attempt };
+                        const fields = info.rateKey
+                          ? { cooldowns: { ...this.task.cooldowns, [info.rateKey]: info } }
+                          : info.scope === "local" ? {} : { retryState: info };
+                        await this.update(fields, [item]);
+                      } else if (progress.retry === null && item.state === "retry_wait") {
+                        item = { ...item, state: "downloading", retryAt: null };
+                        await this.update({}, [item]);
+                      }
                     },
                   );
                   for (const source of this.repo.state.works[id]?.sources || [])
@@ -558,7 +565,7 @@ export class Engine {
               } catch (error) {
                 const fatal =
                   this.repo.poisoned ||
-                  httpStatus(error) === 429 ||
+                  (httpStatus(error) === 429 && !error.deferToSweep) ||
                   [
                     "QuotaExceededError",
                     "NotAllowedError",
@@ -578,6 +585,8 @@ export class Engine {
                     : item.upgrade && this.repo.state.works[id]?.complete
                       ? "画质升级未成功，原文件保留：" + error.message
                       : error.message;
+                item.canRetry = !error.unsupported;
+                item.retryAt = error.retryUntil || null;
                 if (!signal.aborted) {
                   if (error.unsupported) run.unsupported++;
                   else run.failed++;
@@ -591,21 +600,69 @@ export class Engine {
               }
             }
           };
-          const results = await Promise.allSettled([
-            produce(),
-            consume(),
-            consume(),
-          ]);
-          const fatal = results.find(
-            (r) => r.status === "rejected" && r.reason?.name !== "AbortError",
+          const checkResults = async (jobs) => {
+            const results = await Promise.allSettled(jobs);
+            const fatal = results.find(
+              (r) => r.status === "rejected" && r.reason?.name !== "AbortError",
+            );
+            if (fatal) {
+              if (!this.repo.poisoned)
+                await this.update({ status: "paused", sourceErrors: [fatal.reason.message] });
+              throw fatal.reason;
+            }
+          };
+          await checkResults([produce(), consume(), consume()]);
+          const deferred = Object.values(this.task.items).filter(
+            (item) => item.state === "failed" && item.canRetry !== false,
           );
-          if (fatal) {
-            if (!this.repo.poisoned)
-              await this.update({
-                status: "paused",
-                sourceErrors: [fatal.reason.message],
-              });
-            throw fatal.reason;
+          if (!retryOnly && this.task.sourceDone && !signal.aborted && deferred.length) {
+            const current = await this.sources.profile(signal);
+            if (current.uid !== profile.uid) throw new Error("账号已切换，任务已暂停");
+            await this.update({ recovery: { round: 1, status: "running", total: deferred.length } });
+            this.producerFinished = false;
+            const recover = async () => {
+              const pending = [...deferred];
+              try {
+                while (pending.length) {
+                  checkAbort(signal);
+                  if (this.queue.length + this.active.size >= this.capacity) {
+                    await sleep(60, signal); continue;
+                  }
+                  const readyIndex = pending.findIndex((item) => !item.retryAt || item.retryAt <= Date.now());
+                  if (readyIndex < 0) {
+                    const waitUntil = Math.min(...pending.map((item) => item.retryAt));
+                    if (this.task.recovery.status !== "waiting")
+                      await this.update({ recovery: { ...this.task.recovery, status: "waiting", waitUntil } });
+                    await sleep(Math.min(1000, Math.max(1, waitUntil - Date.now())), signal);
+                    continue;
+                  }
+                  const [previous] = pending.splice(readyIndex, 1);
+                  const item = { ...previous, state: "queued", recoveryRound: 1, error: "", retryAt: null };
+                  run.failed--;
+                  await this.update({ run: { ...run }, recovery: { ...this.task.recovery, status: "running", waitUntil: null } }, [item]);
+                  this.queue.push(item.id);
+                }
+              } catch (error) {
+                if (error.name !== "AbortError") { this.controller.abort(); throw error; }
+              } finally { this.producerFinished = true; }
+            };
+            await checkResults([recover(), consume(), consume()]);
+            const recovered = deferred.filter((item) => ["saved", "existing"].includes(this.task.items[item.id]?.state)).length;
+            await this.update({ recovery: { ...this.task.recovery,
+              status: signal.aborted ? "paused" : "completed", recovered,
+              remaining: deferred.length - recovered } });
+            if (scope === "following") {
+              const authorProgress = { ...this.task.authorProgress };
+              for (const author of this.task.authors) {
+                const items = Object.values(this.task.items).filter((item) => item.authorUid === author.uid);
+                const failed = items.filter((item) => ["failed", "unsupported"].includes(item.state)).length;
+                const pending = items.some((item) => !["saved", "existing", "failed", "unsupported"].includes(item.state));
+                authorProgress[author.uid] = { ...authorProgress[author.uid],
+                  status: pending ? "partial" : failed ? "partial" : "completed",
+                  checked: items.length, failed, at: new Date().toISOString() };
+              }
+              await this.update({ authorProgress });
+            }
           }
           await this.update({
             status: signal.aborted ? "paused" : finishStatus(this.task),

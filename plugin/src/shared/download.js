@@ -225,6 +225,7 @@ async function streamResponseToFile(file, response, { offset = 0, onChunk = null
 export async function downloadVerifiedMedia(target, relativePath, url, {
   expected = "video",
   headerTimeoutMs = 30000,
+  firstByteTimeoutMs = 0,
   totalTimeoutMs = 120000,
   signal,
   onProgress,
@@ -242,6 +243,7 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
   let phase = "request";
   let timeoutReason = "header";
   let timeout = setTimeout(() => controller.abort(), headerTimeoutMs);
+  let firstByteTimeout = firstByteTimeoutMs > 0 ? setTimeout(() => controller.abort(), firstByteTimeoutMs) : null;
   try {
     const file = await getFilesystemFileHandle(target, relativePath);
     const resumeStatePath = relativePath + ".resume.json";
@@ -302,7 +304,7 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     }
     const received = await streamResponseToFile(file, response, {
       offset: writeOffset,
-      onChunk: received => {armStallTimeout();onProgress?.({loaded:writeOffset+received,total:expectedTotal});if(signal?.aborted)throw new DOMException('任务已暂停','AbortError');},
+      onChunk: received => {clearTimeout(firstByteTimeout);firstByteTimeout=null;armStallTimeout();onProgress?.({loaded:writeOffset+received,total:expectedTotal});if(signal?.aborted)throw new DOMException('任务已暂停','AbortError');},
     });
     const downloadedAt = timingNow();
     const finalSize = writeOffset + received;
@@ -358,6 +360,7 @@ export async function downloadVerifiedMedia(target, relativePath, url, {
     throw new Error("\u6269\u5c55\u6293\u53d6\u5931\u8d25(" + host + ")\uff1a" + message);
   } finally {
     clearTimeout(timeout);
+    clearTimeout(firstByteTimeout);
     signal?.removeEventListener('abort',stop);
   }
 }

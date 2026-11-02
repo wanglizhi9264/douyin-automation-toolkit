@@ -28,7 +28,7 @@ function clock(options = {}) {
     },
   };
 }
-const c = clock();
+const c = clock({ maxRateRetries: 2 });
 let attempts = 0;
 const starts = [];
 assert.equal(
@@ -130,7 +130,7 @@ const raw = {
 const item = { id: "123", scope: "liked", taskId: "task" },
   signal = new AbortController().signal;
 const bestRepo = repo(),
-  bestClock = clock(),
+  bestClock = clock({rateBaseMs: 100}),
   requests = [];
 let rateOnce = true;
 await createMediaDownloader(
@@ -141,7 +141,7 @@ await createMediaDownloader(
       requests.push(url);
       if (rateOnce) {
         rateOnce = false;
-        throw httpError(429, "60");
+        throw httpError(429, "0.1");
       }
       return { size: 10, contentType: "video/mp4" };
     },
@@ -152,7 +152,7 @@ assert.deepEqual(
   ["https://media.test/best", "https://media.test/best"],
   "429 retries the same highest candidate",
 );
-assert.equal(bestClock.time, 60000);
+assert.equal(bestClock.time, 100);
 const best = Object.values(bestRepo.state.files)[0];
 assert.equal(best.qualityOutcome, "best");
 assert.equal(best.quality.width, 2160);
@@ -163,16 +163,16 @@ await createMediaDownloader(
   { retry: clock().retry },
   {
     transfer: async (t, p, url) => {
-      if (url.endsWith("best")) throw httpError(403);
+      if (url.endsWith("best")) throw httpError(404);
       return { size: 10, contentType: "video/mp4" };
     },
   },
-)(item, raw, signal, async () => {});
+)({ ...item, recoveryRound: 1 }, raw, signal, async () => {});
 const fallback = Object.values(fallbackRepo.state.files)[0];
 assert.equal(fallback.qualityOutcome, "degraded");
 assert.equal(fallback.highest.width, 2160);
 assert.equal(fallback.quality.width, 720);
-assert.match(fallback.fallbackReason, /403/);
+assert.match(fallback.fallbackReason, /404/);
 const limitedRepo = repo(),
   limitedClock = clock({ maxRateRetries: 1 }),
   limitedUrls = [];
@@ -205,7 +205,7 @@ const one = {
     },
   },
 };
-await createMediaDownloader(
+const refreshDownload = createMediaDownloader(
   refreshRepo,
   {
     retry: clock().retry,
@@ -230,7 +230,10 @@ await createMediaDownloader(
       return { size: 10, contentType: "video/mp4" };
     },
   },
-)(item, one, signal, async () => {});
+);
+await assert.rejects(() => refreshDownload(item, one, signal, async () => {}), e => e.deferToSweep);
+assert.equal(refreshes, 0, "no inline detail refresh blocks the main pass");
+await refreshDownload({ ...item, recoveryRound: 1 }, null, signal, async () => {});
 assert.equal(refreshes, 1);
 assert.equal(Object.values(refreshRepo.state.files)[0].refreshedAddress, true);
 console.log(
@@ -264,13 +267,13 @@ assert.deepEqual(forbiddenUrls, [
   "https://media.test/best",
   "https://media.test/best",
 ]);
-assert.equal(transientClock.time, 2500);
+assert.equal(transientClock.time, 100);
 assert.equal(Object.values(transient403.state.files)[0].qualityOutcome, "best");
 const refreshedBest = repo(),
   refreshClock = clock(),
   freshUrls = [];
 let freshCount = 0;
-await createMediaDownloader(
+const freshDownload = createMediaDownloader(
   refreshedBest,
   {
     retry: refreshClock.retry,
@@ -302,11 +305,14 @@ await createMediaDownloader(
       return { size: 10 };
     },
   },
-)(item, raw, signal, () => {});
+);
+await assert.rejects(() => freshDownload(item, raw, signal, () => {}), e => e.deferToSweep);
+assert.equal(freshCount, 0);
+await freshDownload({ ...item, recoveryRound: 1 }, null, signal, () => {});
 assert.equal(freshCount, 1);
 assert.deepEqual(
   freshUrls,
-  [...Array(6).fill("https://media.test/best"), "https://media.test/new-best"],
+  [...Array(2).fill("https://media.test/best"), "https://media.test/new-best"],
   "refresh highest address before lower-quality fallback",
 );
 assert.equal(Object.values(refreshedBest.state.files)[0].quality.width, 2160);
@@ -335,7 +341,7 @@ for (const status of [403, 429, 503, 0]) {
   assert.equal(
     await c.retry.run(
       async () => {
-        if (calls++ < 5)
+        if (calls++ < 1)
           throw status ? httpError(status) : new TypeError("Failed to fetch");
         return "recovered";
       },
@@ -343,7 +349,7 @@ for (const status of [403, 429, 503, 0]) {
     ),
     "recovered",
   );
-  assert.equal(calls, 6, "initial request plus five retries");
+  assert.equal(calls, 2, "initial request plus one retry");
   const e = clock();
   let denials = 0;
   await assert.rejects(
@@ -357,7 +363,7 @@ for (const status of [403, 429, 503, 0]) {
       ),
     (error) => error.retryExhausted === true,
   );
-  assert.equal(denials, 6, "bounded automatic recovery");
+  assert.equal(denials, 2, "bounded automatic recovery");
   if (status === 403)
     assert.equal(
       e.retry.info,
@@ -384,12 +390,33 @@ await assert.rejects(
 );
 assert.equal(pauseCalls, 1, "pause interrupts backoff before next request");
 console.log(
-  "OK: media 403, 429, 503 and network failures recover on fifth retry, stop at five retries, pause interrupts waiting",
+  "OK: media 403, 429, 503 and network failures retry once, stop after two attempts, pause interrupts waiting",
 );
 
 for (const error of [Object.assign(new Error("媒体响应停滞"),{retryable:true}),new TypeError("network error"),new Error("connection reset")]) {
   const retryClock=clock();let tries=0;
-  assert.equal(await retryClock.retry.run(async()=>{if(tries++<5)throw error;return true}),true);
-  assert.equal(tries,6);
+  assert.equal(await retryClock.retry.run(async()=>{if(tries++<1)throw error;return true}),true);
+  assert.equal(tries,2);
 }
 console.log("OK: explicit transfer timeout/truncation flags and network connection errors retry without treating validation or permission failures as transient");
+
+const gated = clock();
+let gatedCalls = 0;
+await assert.rejects(() => gated.retry.run(async () => {
+  gatedCalls++;
+  throw httpError(429, "60");
+}, {deadline:2000,rateKey:'https://cdn-a.test'}), e => e.retryExhausted && e.retryUntil === 60000);
+assert.equal(gatedCalls, 1);
+assert.deepEqual(gated.waits, [], 'long Retry-After does not occupy a download slot');
+assert.equal(gated.retry.info, null, 'media cooldown does not globally pause other work');
+assert.equal(await gated.retry.run(async()=> 'other host', {deadline:2000,rateKey:'https://cdn-b.test'}), 'other host');
+await assert.rejects(() => gated.retry.run(async()=>assert.fail('cooling host must not request'),
+  {deadline:2000,rateKey:'https://cdn-a.test'}), e => e.deferToSweep);
+const budget = clock();
+let budgetCalls=0;
+await assert.rejects(() => budget.retry.run(async()=> {
+  budgetCalls++; await budget.retry.wait(1950);throw httpError(403);
+}, {deadline:2000,retryForbidden:true}), e=>e.retryExhausted);
+assert.equal(budgetCalls, 1, 'retry cannot exceed shared 2 second budget');
+assert.equal(budget.time, 1950);
+console.log('OK: shared failure budget, one backoff, per-host 429 gates, unrelated hosts keep downloading');

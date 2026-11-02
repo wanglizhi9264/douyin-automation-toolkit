@@ -100,3 +100,9 @@ assert.match(html, /HTTP 429/);
 console.log(
   "OK: library report dedupes sources, preserves historical inventory, separates pending/failures, suppresses stale failures, shows truthful quality and escapes scripts/paths",
 );
+const sweepState = structuredClone(state);
+const newestTask = Object.values(sweepState.tasks).sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''))[0];
+newestTask.recovery = {round:1,status:'completed',total:5,recovered:4,remaining:1};
+const sweepModel = buildReportModel(sweepState);
+assert.deepEqual(sweepModel.tasks[0].recovery,newestTask.recovery);
+assert.match(renderLibraryReport(sweepModel), /失败项自动补下：5 个，已补下 4 个，仍需处理 1 个/);

@@ -164,6 +164,30 @@ try {
   await assert.rejects(()=>downloadVerifiedMedia({kind:'filesystem',handle:createDirectory()},'data/short.mp4','https://video.example/short.mp4'),error=>error.retryable===true);
   globalThis.fetch=async(_url,init)=>new Promise((_resolve,reject)=>init.signal.addEventListener('abort',()=>reject(new DOMException('timed out','AbortError')),{once:true}));
   await assert.rejects(()=>downloadVerifiedMedia({kind:'filesystem',handle:createDirectory()},'data/timeout.mp4','https://video.example/timeout.mp4',{headerTimeoutMs:5}),error=>error.retryable===true);
+  // Headers alone must not disable the shared first-byte deadline.
+  globalThis.fetch = async (_url, init) => {
+    const body = new ReadableStream({start(controller) {
+      init.signal.addEventListener('abort', () => controller.error(new DOMException('timeout', 'AbortError')), {once:true});
+    }});
+    return new Response(body, {headers:{'content-type':'video/mp4','content-length':'8'}});
+  };
+  const before = performance.now();
+  await assert.rejects(() => downloadVerifiedMedia({kind:'filesystem',handle:createDirectory()},
+    'data/no-body.mp4','https://video.example/no-body.mp4',
+    {headerTimeoutMs:1000,firstByteTimeoutMs:15,totalTimeoutMs:1000}), e=>e.retryable);
+  assert.ok(performance.now()-before<500, 'headers without body cannot hold the slot');
+  // Continuous progress may finish after the first-byte budget, including large files.
+  globalThis.fetch = async () => {
+    const body = new ReadableStream({start(controller) {
+      controller.enqueue(new Uint8Array([0,0,0,24]));
+      setTimeout(() => {controller.enqueue(new Uint8Array([102,116,121,112]));controller.close();}, 35);
+    }});
+    return new Response(body, {headers:{'content-type':'video/mp4','content-length':'8'}});
+  };
+  const healthy = await downloadVerifiedMedia({kind:'filesystem',handle:createDirectory()},
+    'data/healthy.mp4','https://video.example/healthy.mp4',
+    {headerTimeoutMs:1000,firstByteTimeoutMs:15,totalTimeoutMs:1000});
+  assert.equal(healthy.size,8, 'healthy long transfers are not cut off by the initial-response deadline');
 } finally {
   globalThis.fetch = originalFetch;
 }

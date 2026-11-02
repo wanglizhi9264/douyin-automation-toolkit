@@ -154,7 +154,11 @@ function taskView() {
       )
     : 0;
   const status = running
-    ? retry
+    ? task.recovery?.status === "waiting" && !active.size
+      ? "等待补下"
+      : task.recovery?.status === "running"
+        ? "补下中"
+        : retry
       ? "等待中"
       : active.size
         ? "下载中"
@@ -288,7 +292,7 @@ function render() {
     $("authorSearch").focus();
     $("authorSearch").setSelectionRange(position, position);
   }
-  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.4";
+  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.5";
   $("footState").textContent = engine?.busy
     ? engine.active.size
       ? "下载中"

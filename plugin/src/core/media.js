@@ -119,7 +119,6 @@ export function createMediaDownloader(
     raw,
     signal,
     progress,
-    refreshed = false,
   ) {
     const original = repo.state.works[item.id];
     const upgrading = Boolean(item.upgrade && original?.complete);
@@ -127,11 +126,26 @@ export function createMediaDownloader(
       return { upgraded: false, unchanged: true };
     const staged = [];
     const retired = [];
-    let addressRefreshed = refreshed;
+    const addressRefreshed = Boolean(item.recoveryRound);
+    let firstRequestDeadline = Infinity;
     let normalized = raw ? normalizeAweme(raw, 0, item.scope) : null;
     if (!normalized?.mediaParts?.length) {
-      const detail = await sources.detail(item.id, signal);
-      normalized = normalizeAweme(detail.aweme, 0, item.scope);
+      firstRequestDeadline = retry.now() + 2000;
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      signal?.addEventListener("abort", stop, { once: true });
+      const timer = setTimeout(stop, 2000);
+      try {
+        checkAbort(signal);
+        const detail = await sources.detail(item.id, controller.signal);
+        normalized = normalizeAweme(detail.aweme, 0, item.scope);
+      } catch (error) {
+        checkAbort(signal);
+        if (controller.signal.aborted)
+          throw Object.assign(new Error("刷新下载地址超过 2 秒，稍后补下"), { deferToSweep: true });
+        if (httpStatus(error) === 429) error.deferToSweep = true;
+        throw error;
+      } finally { clearTimeout(timer); signal?.removeEventListener("abort", stop); }
     }
     if (!normalized?.mediaParts?.length) {
       const error = new Error("此作品暂无可下载媒体，可能已失效或无访问权限");
@@ -205,6 +219,9 @@ export function createMediaDownloader(
         highest = quality(candidates[0]);
       if (upgrading && !candidates.length) continue;
       let result, last, path, selected, rank;
+      let requests = 0;
+      const deadline = Math.min(firstRequestDeadline, retry.now() + 2000);
+      firstRequestDeadline = Infinity;
       const attempts = [...(work.diagnostics[part.partId]?.attempts || [])];
       const saveDiagnostic = async (error) => {
         work.diagnostics[part.partId] = {
@@ -243,6 +260,7 @@ export function createMediaDownloader(
         });
       };
       for (const [index, candidate] of candidates.entries()) {
+        if (requests >= 2 || retry.now() >= deadline) break;
         checkAbort(signal);
         rank = index + 1;
         const variant = safe(
@@ -272,7 +290,11 @@ export function createMediaDownloader(
           result = await retry.run(
             async () => {
               try {
+                requests++;
+                await progress({ retry: null, part: i + 1, parts: parts.length });
+                const remaining = Math.max(1, deadline - retry.now());
                 return await transfer(repo.target, path, candidate.url, {
+                  headerTimeoutMs: remaining, firstByteTimeoutMs: remaining, totalTimeoutMs: 2000,
                   expected: part.kind,
                   signal,
                   resumeIdentity: identity,
@@ -293,6 +315,7 @@ export function createMediaDownloader(
               signal,
               label: "媒体下载",
               retryForbidden: true,
+              maxRetries: Math.max(0, 2 - requests - 1), deadline, rateKey: new URL(candidate.url).origin,
               onRetry: async (info) => {
                 if (attempts.length)
                   Object.assign(attempts[attempts.length - 1], {
@@ -323,57 +346,20 @@ export function createMediaDownloader(
           )
             throw error;
           last = error;
-          if (httpStatus(error) === 429) {
+          if (!item.recoveryRound || error.retryExhausted) {
+            error.deferToSweep = true;
             await saveDiagnostic(error);
             throw error;
-          }
-          if (
-            !addressRefreshed &&
-            index === 0 &&
-            httpStatus(error) === 403 &&
-            typeof sources.detail === "function"
-          ) {
-            addressRefreshed = true;
-            await saveDiagnostic(error);
-            let detail;
-            try {
-              detail = await sources.detail(item.id, signal);
-            } catch (refreshError) {
-              if (
-                signal?.aborted ||
-                repo.poisoned ||
-                httpStatus(refreshError) === 429
-              )
-                throw refreshError;
-              attempts.push({
-                at: new Date().toISOString(),
-                rank,
-                status: httpStatus(refreshError),
-                error: "刷新地址失败：" + refreshError.message,
-              });
-            }
-            if (
-              detail?.aweme &&
-              normalizeAweme(detail.aweme, 0, item.scope).mediaParts?.length
-            )
-              return download(item, detail.aweme, signal, progress, true);
           }
         }
       }
       if (!result) {
-        last ||= new Error("没有有效的媒体地址");
+        last ||= new Error("本项已达到 2 秒处理预算");
+        last.deferToSweep = true;
         await saveDiagnostic(last);
-        if (
-          !addressRefreshed &&
-          typeof sources.detail === "function" &&
-          [401, 403, 404].includes(httpStatus(last))
-        ) {
-          const detail = await sources.detail(item.id, signal);
-          if (detail?.aweme)
-            return download(item, detail.aweme, signal, progress, true);
-        }
         throw last;
       }
+
       checkAbort(signal);
       const area = (q) => Number(q?.width || 0) * Number(q?.height || 0);
       const outcome =
@@ -406,7 +392,7 @@ export function createMediaDownloader(
             ? attempts.map((a) => `候选 ${a.rank}: ${a.error}`).join("；")
             : "",
         attempts: attempts.slice(-24),
-        refreshedAddress: refreshed,
+        refreshedAddress: addressRefreshed,
         updatedAt: new Date().toISOString(),
       };
       work = {
@@ -505,6 +491,7 @@ export function createMediaDownloader(
         item.scope,
       );
       try {
+        const coverDeadline = retry.now() + 2000;
         const matching = parts.find(
           (part) => part.kind === "image" && part.url === cover.url,
         );
@@ -525,10 +512,11 @@ export function createMediaDownloader(
             () =>
               transfer(repo.target, coverPath, cover.url, {
                 expected: "image",
+                headerTimeoutMs: Math.max(1, coverDeadline - retry.now()), firstByteTimeoutMs: Math.max(1, coverDeadline - retry.now()), totalTimeoutMs: 2000,
                 signal,
                 resumeIdentity: `${item.id}|cover|${representationKey(cover.url)}`,
               }),
-            { signal, label: "封面下载" },
+            { signal, label: "封面下载", maxRetries: 1, deadline: coverDeadline, rateKey: new URL(cover.url).origin },
           );
         const current = repo.state.works[item.id];
         await repo.commit({
