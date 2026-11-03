@@ -1,3 +1,4 @@
+import { taskStage, taskProblem, matchesAuthor } from "./presentation.js";
 import { getStoredDownloadTarget } from "../shared/download.js";
 import { sendPageRequest } from "../shared/events.js";
 import { Repository } from "../archive/repository.js";
@@ -23,15 +24,6 @@ const iconPaths = {
 };
 const icon = (name) =>
   `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${iconPaths[name]}</svg>`;
-const stateLabels = {
-  starting: "正在准备",
-  running: "下载中",
-  pausing: "正在暂停",
-  paused: "已暂停",
-  finalizing: "正在保存",
-  completed: "已完成",
-  partial: "部分完成",
-};
 const esc = (value) =>
   String(value ?? "").replace(
     /[&<>"']/g,
@@ -123,9 +115,15 @@ function sourceNumbers(scope, task = repo?.latestTask(scope)) {
     ownerUid: repo?.state.owner?.uid,
   });
 }
+function currentStage() {
+  return taskStage(engine?.task, {running:engine?.busy,active:engine?.active,retry:engine?.sources.retry?.info});
+}
+function problemHTML(problem) {
+  return problem ? `<div class="task-problem" role="status" title="${esc(problem.detail)}"><span>${esc(problem.text)}</span>${problem.action ? `<button class="link" data-action="${problem.action}" ${busy() ? "disabled" : ""}>${esc(problem.label)}</button>` : ""}</div>` : "";
+}
 function home() {
-  return `<div class="folder"><span class="folder-icon" aria-hidden="true">${icon("folder")}</span><div class="folder-info"><div class="folder-name">${esc(target?.label || "选择文件夹")}</div></div><button class="link" data-action="folder" ${busy() ? "disabled" : ""}>${target ? "更改" : "选择"}</button></div>
-  ${error && !repo ? errorBox(error) : ""}
+  return `<div class="folder"><span class="folder-icon" aria-hidden="true">${icon("folder")}</span><div class="folder-info"><div class="folder-name">${esc(loading ? "正在载入备份…" : target?.label || "选择文件夹")}</div></div><button class="link" data-action="folder" ${busy() ? "disabled" : ""}>${target ? "更改" : "选择"}</button></div>
+  ${problemHTML(taskProblem(!engine?.busy && latest()?.status === "paused" ? latest() : null,error || (!engine?.busy && engine?.error) || ""))}
   <div class="action-list">${[
     ["liked", "heart", "下载喜欢"],
     ["bookmarked", "bookmark", "下载收藏"],
@@ -133,7 +131,7 @@ function home() {
   ]
     .map(
       ([scope, iconName, title]) =>
-        `<button class="action" data-scope="${scope}" data-action="${engine?.busy && engine.task?.scope === scope ? "task" : scope}" ${!repo || (busy() && !(engine?.busy && engine.task?.scope === scope)) ? "disabled" : ""}><span class="action-icon" aria-hidden="true">${icon(iconName)}</span><span class="action-text"><span class="action-title">${title}</span></span><span class="chevron">›</span></button>`,
+        `<button class="action" data-scope="${scope}" data-action="${engine?.busy && engine.task?.scope === scope ? "task" : scope}" ${!repo || (busy() && !(engine?.busy && engine.task?.scope === scope)) ? "disabled" : ""}><span class="action-icon" aria-hidden="true">${icon(iconName)}</span><span class="action-text"><span class="action-title">${engine?.busy && engine.task?.scope === scope ? `${labels[scope]} · ${currentStage()}` : title}</span></span><span class="chevron">›</span></button>`,
     )
     .join("")}</div>`;
 }
@@ -153,23 +151,17 @@ function taskView() {
           100,
       )
     : 0;
-  const status = running
-    ? task.recovery?.status === "waiting" && !active.size
-      ? "等待补下"
-      : task.recovery?.status === "running"
-        ? "补下中"
-        : retry
-      ? "等待中"
-      : active.size
-        ? "下载中"
-        : "检查中"
-    : stateLabels[task.status] || "已暂停";
+  const status = currentStage();
+  const problem = !running && taskProblem(task,engine?.error || "");
+  const failed = c.failed + c.unsupported;
   return `${back()}<div class="title-row"><h1>下载${esc(labels[task.scope])}</h1><span class="status">${status}</span></div>
-  <div class="source-overview"><div><div class="overview-value" data-metric="platform-total">${task.scope === "following" ? number(task.authors.length) : values.displayTotal || (values.total === null ? "—" : number(values.total))}</div><div class="label">${task.scope === "following" ? "所选作者" : labels[task.scope] + "总数"}</div></div><div><div class="overview-value" data-metric="source-saved">${values.saved === null ? "—" : number(values.saved)}</div><div class="label">本地累计</div></div></div>
-  <div class="task-total task-delta"><span class="delta-label">本次下载</span><span class="number" data-metric="new-downloads">+${number(c.saved)}</span>${c.upgraded ? `<span class="upgrade-count">升级 ${number(c.upgraded)}</span>` : ""}</div>
+  ${problemHTML(problem || (!running && failed ? {text:`本轮有 ${number(failed)} 个作品未成功，原因见本地资料库。`,detail:"下次下载仍会检查最新列表，已完成作品会跳过。",action:"library",label:"查看资料库位置"} : null))}
+  <div class="source-overview"><div><div class="overview-value" data-metric="platform-total">${task.scope === "following" ? number(task.authors.length) : values.displayTotal || (values.total === null ? "—" : number(values.total))}</div><div class="label">${task.scope === "following" ? "所选作者" : labels[task.scope] + "总数"}</div></div><div><div class="overview-value" data-metric="source-saved">${values.saved === null ? "—" : number(values.saved)}</div><div class="label" title="包含历史备份，已取消喜欢或收藏的作品仍保留，因此可能多于平台当前总数。">累计已备份 <span class="hint" tabindex="0" aria-label="包含历史备份，可能多于平台当前总数">ⓘ</span></div></div></div>
+  <div class="task-total task-delta"><span class="delta-label">本次新增</span><span class="number" data-metric="new-downloads">+${number(c.saved)}</span>${c.upgraded ? `<span class="upgrade-count">升级 ${number(c.upgraded)}</span>` : ""}</div>
   ${task.scope === "following" ? `<div class="following-current">${esc(task.authors[[...active.values()][0]?.authorIndex ?? Math.min(task.cursor?.authorIndex || 0, task.authors.length - 1)]?.nickname || "")} · ${Math.min(task.authors.length, ([...active.values()][0]?.authorIndex ?? task.cursor?.authorIndex ?? 0) + 1)} / ${task.authors.length}</div>` : ""}
   <div class="activity-line ${running && !task.sourceDone ? "indeterminate" : ""}"><i style="width:${task.sourceDone ? ratio : running ? 35 : 0}%"></i></div>
-  ${retry ? `<div class="retry-notice">${Math.max(1, Math.ceil((retry.until - Date.now()) / 1000))} 秒后自动继续</div>` : ""}
+  ${retry ? `<div class="retry-notice">${Math.max(1, Math.ceil((retry.until - Date.now()) / 1000))} 秒后继续检查列表</div>` : ""}
+  ${running && task.recovery?.status === "waiting" && !active.size && task.recovery.waitUntil > Date.now() ? `<div class="retry-notice">${Math.max(1,Math.ceil((task.recovery.waitUntil-Date.now())/1000))} 秒后自动补下</div>` : ""}
   <div class="stats task-stats">${[
     ["已检查", c.read],
     ["已跳过", c.existing],
@@ -183,7 +175,7 @@ function taskView() {
     .join("")}</div>
   ${active.size ? '<div class="section-head"><h2>当前下载</h2></div>' : ""}
   <div id="transfers">${[...active.values()].map(transferHTML).join("")}</div>
-  <div class="task-controls"><button class="${running ? "secondary-btn" : "primary"} wide" data-action="${running ? "pause" : "download"}" ${!running && busy() ? "disabled" : ""}>${running ? "暂停下载" : "下载"}</button></div>`;
+  <div class="task-controls"><button title="${running ? "下载依赖当前抖音标签页；关闭或刷新页面会中断，已保存作品保留。" : "从最新列表检查，已有最高画质跳过，未完成的继续下载。"}" class="${running ? "secondary-btn" : "primary"} wide" data-action="${running ? "pause" : "download"}" ${!running && busy() ? "disabled" : ""}>${running ? "暂停下载" : "下载"}</button></div>`;
 }
 function lastFollowingBatch() {
   return (
@@ -199,7 +191,7 @@ function rememberSelection() {
   selectionTimer = setTimeout(
     () =>
       void saveSelection().catch((e) =>
-        notice("作者选择保存失败：" + e.message),
+        { authorError = "作者选择保存失败：" + e.message; notice(authorError); schedule(); },
       ),
     400,
   );
@@ -248,28 +240,30 @@ async function saveSelection() {
     await selectionWriting;
   } finally {
     selectionWriting = null;
+    schedule();
   }
 }
 function authorsView() {
   const shown = authors.filter(
-    (a) => !search || a.nickname.toLowerCase().includes(search.toLowerCase()),
+    (a) => matchesAuthor(a, search),
   );
   const chosen = authors.filter((a) => selected.has(a.uid));
   return `${back()}<h1>选择作者</h1>
-  <input id="authorSearch" class="search" placeholder="搜索作者" value="${esc(search)}" aria-label="搜索作者">
-  <div class="select-all"><label><input id="selectAll" type="checkbox" ${!authorsDone || !shown.length ? "disabled" : ""} ${shown.length && shown.every((a) => selected.has(a.uid)) ? "checked" : ""}>全选</label><span>${authorsLoading ? "加载中 · " : ""}${search ? shown.length : authors.length} 人</span></div>
-  ${shown.map((a) => `<label class="author"><input type="checkbox" data-author="${esc(a.uid)}" ${selected.has(a.uid) ? "checked" : ""}><span class="avatar">${esc(a.nickname.slice(0, 1))}</span><span class="author-info"><span class="author-name">${esc(a.nickname)}</span></span></label>`).join("")}
-  ${!authorsLoading && !authorsDone ? '<button class="link wide" data-action="loadAuthors">加载列表</button>' : ""}${errorBox(authorError)}
-  <div class="author-controls"><button class="primary wide" data-action="startFollowing" ${!chosen.length || busy() ? "disabled" : ""}>下载 · ${chosen.length} 人</button></div>`;
+  <input id="authorSearch" class="search" placeholder="搜索作者名称或 UID" value="${esc(search)}" aria-label="搜索作者名称或 UID">
+  <div class="select-all"><label><input id="selectAll" type="checkbox" ${!authorsDone || !shown.length ? "disabled" : ""} ${shown.length && shown.every((a) => selected.has(a.uid)) ? "checked" : ""}>${search.trim() ? "全选搜索结果" : "全选"}</label><span>${authorsLoading ? "加载中 · " : ""}${search ? shown.length : authors.length} 人 · 已选 ${selected.size} 人</span></div>
+  ${!authorsLoading && !shown.length ? `<p class="author-empty">${search ? "没有匹配的作者，试试其他名称或 UID。" : authorsDone ? "当前没有可读取的关注作者。" : "点击加载列表，读取关注作者。"}</p>` : ""}
+  ${shown.map((a) => `<label class="author"><input type="checkbox" data-author="${esc(a.uid)}" ${selected.has(a.uid) ? "checked" : ""}><span class="avatar">${esc(a.nickname.slice(0, 1))}</span><span class="author-info"><span class="author-name">${esc(a.nickname)}</span><small>UID ${esc(a.uid)}</small></span></label>`).join("")}
+  ${!authorsLoading && !authorsDone ? '<button class="link wide" data-action="loadAuthors">加载列表</button>' : ""}${errorBox(authorError || error)}${authorsDone && chosen.length < selected.size ? '<div class="task-problem"><span>部分上次选择的作者已不在当前可读取名单中。</span><button class="link" data-action="pruneSelection">保留当前可选作者</button></div>' : ""}
+  <div class="author-controls">${selected.size ? `<p class="selection-state">${selectionDirty || selectionWriting ? "正在保存选择…" : "已记住作者选择"}${authorsLoading ? " · 名单仍在加载" : ""}</p>` : ""}<button class="primary wide" data-action="startFollowing" ${!chosen.length || busy() || chosen.length < selected.size ? "disabled" : ""}>下载 · ${chosen.length} 人</button></div>`;
 }
 function details() {
-  return `${back()}<h1>设置</h1>
+  return `${back()}<h1>本地资料库</h1>
   ${
     !repo
       ? '<p class="intro">请先选择文件夹。</p>'
       : `
   ${repo.state.legacyOwnerUnknown ? '<div class="error-box">请确认历史备份属于当前账号。</div><button class="secondary-btn wide" data-action="bind" ' + (busy() ? "disabled" : "") + ">绑定当前账号</button>" : ""}
-  <div class="detail-section"><button class="primary wide" data-action="report" ${busy() ? "disabled" : ""}>${reportWriting ? "正在更新…" : "更新 HTML 看板"}</button></div>
+  <div class="library-location"><strong>本地库.html</strong><p>保存在「${esc(target?.label || "备份文件夹")}」根目录，用浏览器打开即可查看。</p></div><div class="detail-section"><button class="primary wide" data-action="report" ${busy() ? "disabled" : ""}>${reportWriting ? "正在更新…" : "更新资料库报告"}</button></div>
   <div class="detail-section"><button class="secondary-btn wide" data-action="${organizing ? "stopOrganize" : "organize"}" ${loading || engine?.busy || reportWriting ? "disabled" : ""}>${organizing ? "停止整理" : "整理备份"}</button>${organizing ? `<p class="subtle-note">已检查 ${number(organizeProgress?.checked)}</p>` : ""}</div>`
   }
   ${errorBox(error)}`;
@@ -292,12 +286,13 @@ function render() {
     $("authorSearch").focus();
     $("authorSearch").setSelectionRange(position, position);
   }
-  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.6";
-  $("footState").textContent = engine?.busy
-    ? engine.active.size
-      ? "下载中"
-      : "检查中"
-    : "";
+  if ($("selectAll")) {
+    const shown = authors.filter(a=>matchesAuthor(a,search));
+    const count = shown.filter(a=>selected.has(a.uid)).length;
+    $("selectAll").indeterminate = count > 0 && count < shown.length;
+  }
+  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.7";
+  $("footState").textContent = engine?.busy ? currentStage() : "";
   renderFloating();
   for (const button of document.querySelectorAll("[data-quick]")) {
     button.disabled =
@@ -323,15 +318,27 @@ function renderFloating() {
   $("floating").title = ring.visible
     ? `${ring.label} · 点击查看进度，拖动调整位置`
     : "展开抖音备份 · 可拖动";
+  if (engine?.busy) $("floating").title = `${currentStage()} · ${ring.label} · 点击查看进度`;
 }
 function transferHTML(item) {
   return `<div class="transfer" data-transfer="${esc(item.id)}"><div class="transfer-title">${esc(item.desc || item.id)}</div><div class="transfer-meta"><span data-transfer-meta>${esc(item.authorName || "准备媒体")}${item.parts ? ` · ${item.part}/${item.parts} 段` : ""}</span><span data-transfer-bytes>${bytes(item.loaded)}${item.total ? " / " + bytes(item.total) : ""}</span></div><div class="mini-bar"><i style="width:${item.total ? Math.min(100, (item.loaded / item.total) * 100) : 0}%"></i></div></div>`;
+}
+function refreshStageText() {
+  const stage = currentStage();
+  const status = view.querySelector(".title-row .status");
+  if (status && status.textContent !== stage) status.textContent = stage;
+  const foot = engine?.busy ? stage : "";
+  if ($("footState").textContent !== foot) $("footState").textContent = foot;
+  const entry = view.querySelector('[data-action="task"] .action-title');
+  const title = `${labels[engine?.task?.scope]} · ${stage}`;
+  if (entry && entry.textContent !== title) entry.textContent = title;
 }
 function scheduleProgress() {
   if (progressTimer) return;
   progressTimer = setTimeout(() => {
     progressTimer = null;
     renderFloating();
+    refreshStageText();
     const container = $("transfers");
     if (route !== "task" || !container) return;
     for (const item of engine?.active.values() || []) {
@@ -573,6 +580,7 @@ async function action(name) {
       navigate("home");
       return;
     }
+    if (name === "library") { navigate("details"); return; }
     if (name === "task") {
       navigate("task");
       return;
@@ -600,7 +608,15 @@ async function action(name) {
       await loadAuthors();
       return;
     }
+    if (name === "pruneSelection") {
+      if (!authorsDone) return;
+      selected = new Set(authors.filter(a=>selected.has(a.uid)).map(a=>a.uid));
+      rememberSelection(); render(); return;
+    }
     if (name === "startFollowing") {
+      if (authors.filter(a=>selected.has(a.uid)).length < selected.size) {
+        notice("部分已选作者尚未加载，请等名单读取完成后再下载。"); return;
+      }
       await start(
         "following",
         authors.filter((a) => selected.has(a.uid)),
@@ -695,7 +711,7 @@ view.addEventListener("change", (event) => {
   }
   if (event.target.id === "selectAll" && authorsDone) {
     for (const author of authors.filter(
-      (a) => !search || a.nickname.toLowerCase().includes(search.toLowerCase()),
+      (a) => matchesAuthor(a, search),
     ))
       event.target.checked
         ? selected.add(author.uid)
@@ -907,7 +923,7 @@ window.addEventListener("beforeunload", (event) => {
 });
 setInterval(() => void refreshTarget(), 3000);
 setInterval(() => {
-  if ((engine?.busy || authorsLoading) && engine.sources.retry?.last)
+  if ((engine?.busy || authorsLoading) && (engine.sources.retry?.info || engine.task?.recovery?.status === "waiting"))
     schedule();
 }, 1000);
 render();

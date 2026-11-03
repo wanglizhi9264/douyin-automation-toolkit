@@ -249,9 +249,21 @@ try {
     {},
     { timeout: 8000 },
   );
+  await page.locator("#authorSearch").fill("secA");
+  assert.equal(await page.locator(".author").count(),0);
+  await page.locator("#authorSearch").fill("0");
+  assert.equal(await page.locator(".author").count(),1);
+  assert.ok((await page.locator(".author").innerText()).includes("UID 0"));
+  await page.locator("#authorSearch").fill("");
   await page.locator("#selectAll").check();
   await page.locator("[data-action=startFollowing]").click();
   await page.locator(".transfer").first().waitFor({ timeout: 8000 });
+  await page.locator('.title-row .status').getByText('下载中',{exact:true}).waitFor({timeout:8000});
+  await page.locator('[data-action="home"]').click();
+  const currentEntry = page.locator('[data-scope="following"]');
+  assert.match(await currentEntry.innerText(), /关注 · /);
+  assert.equal(await currentEntry.getAttribute('data-action'),'task');
+  await currentEntry.click();
   await page.locator("[data-action=pause]").click();
   await page.getByText("已暂停", { exact: true }).waitFor();
   await page.reload();
@@ -264,9 +276,14 @@ try {
     {},
     { timeout: 8000 },
   );
+  await page.locator("#authorSearch").fill("作者 0");
+  assert.equal(await page.locator(".author").count(),1);
+  assert.ok((await page.locator(".select-all").innerText()).includes("全选搜索结果"));
+  await page.locator("#authorSearch").fill("");
+  await page.locator(".selection-state").getByText("已记住作者选择", {exact:false}).waitFor();
   await page.screenshot({ path: output + "/following-remembered.png" });
   await page.locator("[data-action=startFollowing]").click();
-  await page.getByText("已完成", { exact: true }).waitFor({ timeout: 10000 });
+  await page.getByText("本轮完成", { exact: true }).waitFor({ timeout: 10000 });
   await page.locator(".following-current").waitFor();
   const snapshot = await page.evaluate(async () => {
     const { Repository } = await import("/src/archive/repository.js");

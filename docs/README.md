@@ -49,3 +49,5 @@
 - [0.8.5 快速跳过与自动补下](plugin-release-0.8.5.md)
 
 - [0.8.6 分类报告](plugin-release-0.8.6.md)
+
+- [0.8.7 清晰状态与恢复提示](plugin-release-0.8.7.md)

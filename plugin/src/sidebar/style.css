@@ -907,3 +907,5 @@ body.collapsed {
   #view.home-view,main {padding:20px;}
   .home-view .folder {padding:12px;}
 }
+
+.task-problem{display:grid;gap:6px;padding:12px 13px;margin:12px 0 18px;border-left:2px solid #0071e3;background:#f5f8fc;font-size:12px;line-height:1.7;color:#4b5666;overflow-wrap:anywhere}.task-problem .link{justify-self:start;padding:0}.hint{color:#86868b;font-size:11px;cursor:help}.selection-state{font-size:11px;color:#6e6e73;margin-bottom:10px}.author-info small{display:block;font-size:10px;overflow-wrap:anywhere}.author-empty{padding:24px 0;color:#86868b;font-size:12px}.library-location{padding:18px 0;border-bottom:1px solid #ededf0}.library-location strong{font-size:14px;font-weight:500}.library-location p{margin-top:6px;color:#6e6e73;font-size:12px;line-height:1.7}

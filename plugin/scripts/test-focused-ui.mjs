@@ -329,7 +329,7 @@ try {
   denyRetryMedia = false;
   await page.locator("[data-action=download]").click();
   await page.getByRole("heading", { name: "下载喜欢", exact: true }).waitFor();
-  await page.getByText("已完成", { exact: true }).waitFor({ timeout: 10000 });
+  await page.getByText("本轮完成", { exact: true }).waitFor({ timeout: 10000 });
   assert.ok(
     (await page.evaluate(() => window.likedPageRequests)) > beforeRetry,
     "normal download scans from the first page again",
@@ -514,6 +514,22 @@ try {
     "close hides frame without losing saved state",
   );
   await host.close();
+  await page.evaluate(async()=>{
+    const {Repository}=await import('/src/archive/repository.js');
+    const r=await Repository.open({kind:'filesystem',handle:await navigator.storage.getDirectory()});
+    const task=structuredClone(r.latestTask('liked'));
+    task.id='persistent-pause';task.createdAt=new Date(Date.now()+1000).toISOString();
+    task.status='paused';task.sourceErrors=['文件夹授权已失效'];
+    await r.commit({tasks:[task]});
+  });
+  await page.reload();
+  await page.locator('#floating').click();
+  await page.locator('.task-problem').getByText('备份文件夹暂不可用。请连接磁盘，重新选择并授权原文件夹。').waitFor();
+  assert.equal(await page.locator('.task-problem [data-action="folder"]').count(),1);
+  await page.screenshot({path:output+'/persistent-pause.png'});
+  await page.locator('#menuBtn').click();
+  await page.getByRole('heading',{name:'本地资料库',exact:true}).waitFor();
+  assert.ok((await page.locator('.library-location').innerText()).includes('本地库.html'));
   assert.deepEqual(errors, []);
   console.log(
     "PASS focused UI: concentric ring at five animation phases, radial bounds, drag, close; screenshots " +
