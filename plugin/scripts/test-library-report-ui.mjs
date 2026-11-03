@@ -58,6 +58,7 @@ for (let i = 1; i <= 201; i++) {
         ? 'XSS test </script><img src=x onerror="window.pwned=1">'
         : `珍藏作品 ${i}`,
     authorName: `作者 ${i % 10}`,
+    authorUid: String(i % 10),
     sources: i % 2 === 0 ? ["liked", "bookmarked"] : ["following"],
     files: [file],
   };
@@ -77,6 +78,10 @@ for (let i = 1; i <= 201; i++) {
     fallbackReason: i % 3 === 0 ? "HTTP 403" : "",
   };
 }
+const scopedVideo = 'data/收藏/视频/作品 2.mp4', cover = 'data/收藏/封面/作品 2.jpg';
+state.works['2'].files.unshift(cover,scopedVideo);
+state.files[cover] = {path:cover,workId:'2',partId:'cover',kind:'image',role:'cover',complete:true,size:10};
+state.files[scopedVideo] = {...state.files[state.works['2'].files.at(-1)],path:scopedVideo};
 const model = buildReportModel(state, { folderLabel: "我的抖音备份" }),
   file = path.join(output, "本地库.html");
 await fs.writeFile(file, renderLibraryReport(model));
@@ -93,15 +98,34 @@ try {
     errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto(pathToFileURL(file).href);
+  await page.locator(".collection").first().waitFor();
+  assert.equal(await page.locator(".collection").count(),3);
+  assert.ok(await page.locator("#library").isHidden());
+  assert.equal(await page.locator("#report-details").getAttribute("open"),null);
+  await page.screenshot({path:path.join(output,"home.png")});
+  await page.locator('.collection[data-open-scope="following"]').click();
+  assert.ok(await page.locator("#authors-panel").isVisible());
+  assert.equal(await page.locator(".author-row").count(),5);
+  await page.locator('#author-search').fill('作者 1');
+  assert.equal(await page.locator('.author-row').count(),1);
+  await page.locator('.author-row').first().click();
+  assert.ok((await page.locator('.work-title small').allTextContents()).every(t=>t.includes('作者 1')));
+  await page.locator('#browse-back').click();
+  assert.ok(await page.locator('#authors-panel').isVisible());
+  await page.locator('nav [data-all]').click();
   await page.locator(".work-row").first().waitFor();
   assert.equal(await page.locator(".work-row").count(), 50);
   assert.match(await page.locator("#count").innerText(), /204/);
   await page.screenshot({ path: path.join(output, "overview.png") });
-  await page.locator('[data-scope="bookmarked"]').click();
+  await page.locator('nav [data-open-scope="bookmarked"]').click();
   assert.match(await page.locator("#count").innerText(), /100/);
+  const mediaLink = page.locator('.work-row').filter({has:page.locator('[data-id="2"]')}).locator('.row-actions a').first();
+  assert.equal(await mediaLink.getAttribute('href'), scopedVideo.split('/').map(encodeURIComponent).join('/'));
   await page.locator("#next").click();
   assert.equal(await page.locator(".work-row").count(), 50);
   await page.locator("#reset").click();
+  assert.match(await page.locator("#count").innerText(), /100/,'reset stays in current collection');
+  await page.locator('nav [data-all]').click();
   await page.locator("#search").fill("XSS test");
   assert.equal(await page.locator(".work-row").count(), 1);
   assert.equal(await page.locator(".work-title img").count(), 0);
@@ -116,6 +140,8 @@ try {
       t.includes("已降级"),
     ),
   );
+  await page.locator('nav [data-home]').click();
+  await page.locator('#report-details').evaluate(el=>el.open=true);
   await page.locator("[data-issue]").first().click();
   assert.equal(await page.locator(".work-row").count(), 2);
   assert.match(await page.locator("#rows").innerText(), /HTTP 429/);
@@ -134,6 +160,11 @@ try {
       "report has no overflow at " + width,
     );
   }
+  await page.locator('nav [data-home]').click();
+  for (const width of [390,768,1440]) {
+    await page.setViewportSize({width,height:900});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  }
   await page.setViewportSize({ width: 390, height: 900 });
   await page.evaluate(() => scrollTo(0, 0));
   await page.screenshot({ path: path.join(output, "mobile.png") });
@@ -141,6 +172,7 @@ try {
   if (process.env.REAL_REPORT) {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(pathToFileURL(process.env.REAL_REPORT).href);
+    await page.locator('nav [data-all]').click();
     await page.locator(".work-row").first().waitFor();
     assert.equal(await page.locator(".work-row").count(), 50);
     await page.screenshot({ path: path.join(output, "real-overview.png") });

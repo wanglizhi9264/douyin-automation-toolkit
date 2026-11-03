@@ -47,3 +47,5 @@
 - [0.8.4 可读文件名](plugin-release-0.8.4.md)
 
 - [0.8.5 快速跳过与自动补下](plugin-release-0.8.5.md)
+
+- [0.8.6 分类报告](plugin-release-0.8.6.md)
