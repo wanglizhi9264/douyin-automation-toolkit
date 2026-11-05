@@ -1,8 +1,10 @@
 # ADR-0001：作品记录使用作用域复合键
 
-- 状态：Accepted
+- 状态：Superseded（现代 v2 库；旧 IndexedDB 兼容实现仍保留）
 - 日期：2026-07-15
 - 影响版本：插件 0.3.0+
+
+> 现代库使用全库 works[id] + sources + files[path]，见 [ADR-0004](0004-modern-archive-and-incremental-backup.md)。以下禁止按 ID 合并的约束只适用于原旧库模型。
 
 ## 背景
 
