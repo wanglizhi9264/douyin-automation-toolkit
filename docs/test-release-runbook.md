@@ -1,6 +1,6 @@
 # 插件测试与发布手册
 
-更新：2026-11-05；适用 **0.8.7**。产品验收依据 [Spec v0.3](plugin-product-spec-v0.3.md)，实现依据 [技术规格](implementation-spec-0.8.7.md)。旧版本清单与后端/私信审查另见 [历史发布手册](test-release-runbook-legacy.md)，旧的“100 条批次”“新目录二次确认”不作为当前下载流程要求。
+更新于 2026-11-10。适用 **0.8.8**。产品验收依据 [Spec v0.3](plugin-product-spec-v0.3.md)，实现依据 [技术基线](implementation-spec-0.8.7.md) 与 [0.8.8 实现变更](plugin-release-0.8.8.md)。旧版本清单与后端/私信审查另见 [历史发布手册](test-release-runbook-legacy.md)，旧的“100 条批次”“新目录二次确认”不作为当前下载流程要求。
 
 ## 1. 验证层级与状态
 
@@ -29,7 +29,7 @@ npm run check:report-ui
 | 业务 | 回归入口（plugin/scripts） |
 | --- | --- |
 | 资源/桥接/目录权限 | check-extension、test-content-bridge、test-download-target |
-| 流水线、库锁、暂停、增量、补轮 | test-backup-engine |
+| 流水线、库锁、暂停、增量、失败收尾 | test-backup-engine |
 | 平台/历史/本轮数量与悬浮进度 | test-backup-progress、test-floating-statistics |
 | 响应预算、403/429、地址刷新、候选 | test-retry-quality、test-download-target |
 | 来源分页和完整关注名单 | test-pagination、test-following-list |
@@ -49,7 +49,7 @@ npm run check:report-ui
 4. **分页**：重叠作品不重计；非零末页可正确确认；游标循环、异常空页和接口失败不能标成完整扫描。
 5. **传输**：单视频、多图片、多视频、live photo；暂停后字节和分段续传；错误 MIME、长度不符、206 偏移错误不能算完成。
 6. **响应预算**：无响应、403、网络错误不能多轮长时间卡同一项；响应等待与一次退避共用预算；正常长视频持续传输超过 2 秒仍可完成。
-7. **补轮**：主列表先跑完，失败后返回一次；checked 不变、failed 转成功；持续失败不无限循环；补下等待可暂停；未完整扫描时不补成全量成功。
+7. **失败收尾与暂停**：失败项让出槽位，主列表结束后直接收尾。暂停能取消排队请求，只提交状态日志，重开后仍能恢复已保存进度。
 8. **限流**：媒体 origin A 冷却不全局阻塞 B；长 Retry-After 不占下载槽；列表限流可暂停；状态不能把仍在传输的文件显示为整体无工作。
 9. **质量**：best/unknown 不盲目重下；明确降级且更好才升级；升级失败、暂停和写盘错误保留旧完整文件；成功不计新增。
 10. **关注**：完整分页无 20 人/100 作品产品截断；名称/UID 搜索、结果全选和半选正确；刷新恢复选择；未加载的已选作者不被静默遗漏；缺失项要明确处理；不同作者传输不重叠。

@@ -565,7 +565,7 @@ export class Engine {
               } catch (error) {
                 const fatal =
                   this.repo.poisoned ||
-                  (httpStatus(error) === 429 && !error.deferToSweep) ||
+                  (httpStatus(error) === 429 && !error.mediaFailure) ||
                   [
                     "QuotaExceededError",
                     "NotAllowedError",
@@ -585,7 +585,6 @@ export class Engine {
                     : item.upgrade && this.repo.state.works[id]?.complete
                       ? "画质升级未成功，原文件保留：" + error.message
                       : error.message;
-                item.canRetry = !error.unsupported;
                 item.retryAt = error.retryUntil || null;
                 if (!signal.aborted) {
                   if (error.unsupported) run.unsupported++;
@@ -612,62 +611,12 @@ export class Engine {
             }
           };
           await checkResults([produce(), consume(), consume()]);
-          const deferred = Object.values(this.task.items).filter(
-            (item) => item.state === "failed" && item.canRetry !== false,
-          );
-          if (!retryOnly && this.task.sourceDone && !signal.aborted && deferred.length) {
-            const current = await this.sources.profile(signal);
-            if (current.uid !== profile.uid) throw new Error("账号已切换，任务已暂停");
-            await this.update({ recovery: { round: 1, status: "running", total: deferred.length } });
-            this.producerFinished = false;
-            const recover = async () => {
-              const pending = [...deferred];
-              try {
-                while (pending.length) {
-                  checkAbort(signal);
-                  if (this.queue.length + this.active.size >= this.capacity) {
-                    await sleep(60, signal); continue;
-                  }
-                  const readyIndex = pending.findIndex((item) => !item.retryAt || item.retryAt <= Date.now());
-                  if (readyIndex < 0) {
-                    const waitUntil = Math.min(...pending.map((item) => item.retryAt));
-                    if (this.task.recovery.status !== "waiting")
-                      await this.update({ recovery: { ...this.task.recovery, status: "waiting", waitUntil } });
-                    await sleep(Math.min(1000, Math.max(1, waitUntil - Date.now())), signal);
-                    continue;
-                  }
-                  const [previous] = pending.splice(readyIndex, 1);
-                  const item = { ...previous, state: "queued", recoveryRound: 1, error: "", retryAt: null };
-                  run.failed--;
-                  await this.update({ run: { ...run }, recovery: { ...this.task.recovery, status: "running", waitUntil: null } }, [item]);
-                  this.queue.push(item.id);
-                }
-              } catch (error) {
-                if (error.name !== "AbortError") { this.controller.abort(); throw error; }
-              } finally { this.producerFinished = true; }
-            };
-            await checkResults([recover(), consume(), consume()]);
-            const recovered = deferred.filter((item) => ["saved", "existing"].includes(this.task.items[item.id]?.state)).length;
-            await this.update({ recovery: { ...this.task.recovery,
-              status: signal.aborted ? "paused" : "completed", recovered,
-              remaining: deferred.length - recovered } });
-            if (scope === "following") {
-              const authorProgress = { ...this.task.authorProgress };
-              for (const author of this.task.authors) {
-                const items = Object.values(this.task.items).filter((item) => item.authorUid === author.uid);
-                const failed = items.filter((item) => ["failed", "unsupported"].includes(item.state)).length;
-                const pending = items.some((item) => !["saved", "existing", "failed", "unsupported"].includes(item.state));
-                authorProgress[author.uid] = { ...authorProgress[author.uid],
-                  status: pending ? "partial" : failed ? "partial" : "completed",
-                  checked: items.length, failed, at: new Date().toISOString() };
-              }
-              await this.update({ authorProgress });
-            }
-          }
+          // Each completed change already has a durable journal entry.
+          // Pausing only needs to drain in-flight writes and save the status.
+          if (!signal.aborted) await this.repo.compact();
           await this.update({
             status: signal.aborted ? "paused" : finishStatus(this.task),
           });
-          await this.repo.compact();
         },
       )
       .catch(async (error) => {

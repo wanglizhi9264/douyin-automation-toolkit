@@ -167,7 +167,7 @@ await createMediaDownloader(
       return { size: 10, contentType: "video/mp4" };
     },
   },
-)({ ...item, recoveryRound: 1 }, raw, signal, async () => {});
+)(item, raw, signal, async () => {});
 const fallback = Object.values(fallbackRepo.state.files)[0];
 assert.equal(fallback.qualityOutcome, "degraded");
 assert.equal(fallback.highest.width, 2160);
@@ -231,44 +231,26 @@ const refreshDownload = createMediaDownloader(
     },
   },
 );
-await assert.rejects(() => refreshDownload(item, one, signal, async () => {}), e => e.deferToSweep);
+await assert.rejects(() => refreshDownload(item, one, signal, async () => {}), e => e.mediaFailure);
 assert.equal(refreshes, 0, "no inline detail refresh blocks the main pass");
-await refreshDownload({ ...item, recoveryRound: 1 }, null, signal, async () => {});
+await refreshDownload(item, null, signal, async () => {});
 assert.equal(refreshes, 1);
 assert.equal(Object.values(refreshRepo.state.files)[0].refreshedAddress, true);
 console.log(
   "OK: Retry-After dates/seconds, exponential cooldown, cancellation, bounded 429, source retry, highest-quality retry without downgrade, recorded fallback and one-time expired-address refresh",
 );
 
-const transient403 = repo(),
-  transientClock = clock(),
-  forbiddenUrls = [];
-let deniedOnce = true;
-await createMediaDownloader(
-  transient403,
-  {
-    retry: transientClock.retry,
-    detail: async () => {
-      throw new Error("must not refresh when retry succeeds");
-    },
+const forbiddenClock = clock();
+let forbiddenCalls = 0;
+const deniedDownload = createMediaDownloader(repo(), { retry: forbiddenClock.retry }, {
+  transfer: async () => {
+    forbiddenCalls++;
+    throw httpError(403);
   },
-  {
-    transfer: async (t, p, url) => {
-      forbiddenUrls.push(url);
-      if (deniedOnce) {
-        deniedOnce = false;
-        throw httpError(403);
-      }
-      return { size: 10 };
-    },
-  },
-)(item, raw, signal, () => {});
-assert.deepEqual(forbiddenUrls, [
-  "https://media.test/best",
-  "https://media.test/best",
-]);
-assert.equal(transientClock.time, 100);
-assert.equal(Object.values(transient403.state.files)[0].qualityOutcome, "best");
+});
+await assert.rejects(() => deniedDownload(item, raw, signal, () => {}), e => e.httpStatus === 403);
+assert.equal(forbiddenCalls, 1, "403 does not retry the same address or try another representation");
+assert.deepEqual(forbiddenClock.waits, []);
 const refreshedBest = repo(),
   refreshClock = clock(),
   freshUrls = [];
@@ -306,13 +288,13 @@ const freshDownload = createMediaDownloader(
     },
   },
 );
-await assert.rejects(() => freshDownload(item, raw, signal, () => {}), e => e.deferToSweep);
+await assert.rejects(() => freshDownload(item, raw, signal, () => {}), e => e.mediaFailure);
 assert.equal(freshCount, 0);
-await freshDownload({ ...item, recoveryRound: 1 }, null, signal, () => {});
+await freshDownload(item, null, signal, () => {});
 assert.equal(freshCount, 1);
 assert.deepEqual(
   freshUrls,
-  [...Array(2).fill("https://media.test/best"), "https://media.test/new-best"],
+  ["https://media.test/best", "https://media.test/new-best"],
   "refresh highest address before lower-quality fallback",
 );
 assert.equal(Object.values(refreshedBest.state.files)[0].quality.width, 2160);
@@ -332,7 +314,7 @@ assert.equal(
   "403 retry is explicitly scoped to media, not all APIs",
 );
 console.log(
-  "OK: transient 403 same-quality retry, one fresh highest address before fallback, bounded media-only policy",
+  "OK: single-attempt 403, one fresh highest address before fallback, bounded media-only policy",
 );
 
 for (const status of [403, 429, 503, 0]) {
@@ -411,7 +393,7 @@ assert.deepEqual(gated.waits, [], 'long Retry-After does not occupy a download s
 assert.equal(gated.retry.info, null, 'media cooldown does not globally pause other work');
 assert.equal(await gated.retry.run(async()=> 'other host', {deadline:2000,rateKey:'https://cdn-b.test'}), 'other host');
 await assert.rejects(() => gated.retry.run(async()=>assert.fail('cooling host must not request'),
-  {deadline:2000,rateKey:'https://cdn-a.test'}), e => e.deferToSweep);
+  {deadline:2000,rateKey:'https://cdn-a.test'}), e => e.retryExhausted && e.httpStatus === 429);
 const budget = clock();
 let budgetCalls=0;
 await assert.rejects(() => budget.retry.run(async()=> {
@@ -420,3 +402,30 @@ await assert.rejects(() => budget.retry.run(async()=> {
 assert.equal(budgetCalls, 1, 'retry cannot exceed shared 2 second budget');
 assert.equal(budget.time, 1950);
 console.log('OK: shared failure budget, one backoff, per-host 429 gates, unrelated hosts keep downloading');
+
+// A stuck list request cannot hold up details. Cancelling queued details
+// rejects immediately and prevents the cancelled request from being sent.
+let releaseList, releaseDetail;
+const listGate = new Promise(resolve => { releaseList = resolve; });
+const detailGate = new Promise(resolve => { releaseDetail = resolve; });
+const requested = [];
+const lanes = new Sources(async (type, payload) => {
+  requested.push(payload.id);
+  if (payload.id === "list") await listGate;
+  if (payload.id === "detail") await detailGate;
+  return { ok: true };
+});
+const listing = lanes.call("FETCH_LIKED_PAGE", { id: "list" });
+const detail = lanes.call("FETCH_AWEME_DETAIL", { id: "detail" });
+await new Promise(resolve => setTimeout(resolve, 10));
+assert.deepEqual(requested, ["list", "detail"]);
+const cancelled = new AbortController();
+const waiting = lanes.call("FETCH_AWEME_DETAIL", { id: "cancelled" }, cancelled.signal);
+cancelled.abort();
+await assert.rejects(waiting, { name: "AbortError" });
+releaseDetail();
+releaseList();
+await Promise.all([listing, detail]);
+await lanes.call("FETCH_AWEME_DETAIL", { id: "next" });
+assert.deepEqual(requested, ["list", "detail", "next"]);
+console.log("OK: independent paced list/detail lanes and immediate queued-request cancellation");

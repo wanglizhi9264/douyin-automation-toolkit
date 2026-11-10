@@ -1,5 +1,8 @@
 # 抖音备份技术实现规格 0.8.7
 
+> 0.8.8 的列表与详情调度、失败收尾及暂停行为见 [实现变更](plugin-release-0.8.8.md)。
+
+
 更新：2026-11-05。按 `plugin/manifest.json` 与源码核对；只描述现代扩展，后端独立工具和旧 `sidebar/app.js` 不属于这条运行链。产品语义见 [产品规格 v0.3](plugin-product-spec-v0.3.md)，模块概览见 [架构](architecture-design.md)。相对源码链接指向实际模块，不固定易失效的行号。
 
 ## 1. 运行链与职责

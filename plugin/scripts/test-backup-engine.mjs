@@ -1008,69 +1008,42 @@ console.log(
   );
 }
 
-// Failed media must release slots, then be recovered exactly once after discovery.
-for (const permanentlyUnavailable of [false, true]) {
-  const recoveryRepo = await Repository.open(memoryFS().target);
-  const source = fakeSources(6), calls = [];
-  const engine = new Engine(recoveryRepo, source, async (item, raw) => {
-    calls.push({ id: item.id, recovery: item.recoveryRound || 0, raw });
-    if (["1", "3"].includes(item.id) && (!item.recoveryRound || permanentlyUnavailable))
-      throw Object.assign(new Error("HTTP 403"), { deferToSweep: true });
-    await recoveryRepo.commit({ works: [{ id: item.id, complete: true,
+// Permanent failures and cooled origins must not create an end-of-run queue.
+{
+  const failureRepo = await Repository.open(memoryFS().target);
+  const source = fakeSources(6);
+  const calls = [];
+  const engine = new Engine(failureRepo, source, async (item) => {
+    calls.push(item.id);
+    if (item.id === "1") throw new Error("HTTP 403");
+    if (item.id === "3") throw Object.assign(new Error("HTTP 429"), {
+      mediaFailure: true,
+      retryUntil: Date.now() + 60_000,
+    });
+    await failureRepo.commit({ works: [{ id: item.id, complete: true,
       files: [], sources: [item.scope], lastTask: item.taskId }] });
   }, { lock: mutex(), capacity: 4 });
   await engine.start("liked");
-  const main = calls.filter(c => !c.recovery), tail = calls.filter(c => c.recovery);
-  assert.equal(main.length, 6);
-  assert.deepEqual(tail.map(c => c.id).sort(), ["1", "3"]);
-  assert.equal(calls.findIndex(c => c.recovery), 6, "all main items precede recovery");
-  assert.ok(tail.every(c => !c.raw), "recovery refreshes addresses rather than reusing stale list data");
-  assert.equal(source.pages, 1, "automatic sweep never re-reads the list");
-  assert.equal(engine.task.run.checked, 6, "recovery doesn't inflate checked totals");
-  assert.equal(engine.task.run.saved, permanentlyUnavailable ? 4 : 6);
-  assert.equal(engine.task.run.failed, permanentlyUnavailable ? 2 : 0);
-  assert.equal(engine.task.recovery.recovered, permanentlyUnavailable ? 0 : 2);
-  assert.equal(engine.task.status, permanentlyUnavailable ? "partial" : "completed");
+  assert.deepEqual(calls.sort(), ["1","2","3","4","5","6"]);
+  assert.equal(source.pages, 1);
+  assert.equal(engine.task.run.checked, 6);
+  assert.equal(engine.task.run.saved, 4);
+  assert.equal(engine.task.run.failed, 2);
+  assert.equal(engine.task.status, "partial");
 }
 {
-  const recoveryRepo = await Repository.open(memoryFS().target);
-  const engine = new Engine(recoveryRepo, fakeSources(3), async (item, raw, signal) => {
-    if (!item.recoveryRound) throw Object.assign(new Error("temporarily unavailable"), {deferToSweep:true});
+  const fs = memoryFS();
+  const pauseRepo = await Repository.open(fs.target);
+  pauseRepo.compact = async () => assert.fail("pause must not rewrite a full snapshot");
+  const engine = new Engine(pauseRepo, fakeSources(3), async (item, raw, signal) => {
     await sleep(10000, signal);
   }, {lock:mutex()});
-  const done = engine.start("liked");
-  await waitFor(() => engine.task.recovery?.status === "running" && engine.active.size > 0);
+  engine.start("liked");
+  await waitFor(() => engine.active.size > 0);
   await engine.pause();
-  await done;
-  assert.equal(engine.task.status, "paused");
-  assert.equal(engine.task.recovery.status, "paused");
+  const reopened = await Repository.open(fs.target);
+  assert.equal(reopened.state.tasks[engine.task.id].status, "paused");
   assert.equal(engine.task.run.checked, 3);
   assert.ok(engine.counts.pending > 0);
 }
-console.log("OK: one automatic tail sweep, fresh addresses, unchanged checked counts, no infinite failures, pause cancels recovery");
-{
-  const recoveryRepo = await Repository.open(memoryFS().target), calls = [];
-  const authors = [{uid:'A',secUid:'secA',nickname:'A'},{uid:'B',secUid:'secB',nickname:'B'}];
-  let activeAuthor = null, activeCount = 0;
-  const sources = new Sources(async(type,payload)=>{
-    if(type==='GET_SELF_PROFILE') return {ok:true,json:{user:{uid:'self',sec_uid:'sec'}}};
-    const author=payload.secUid==='secA'?'A':'B';
-    return {ok:true,awemeList:[1,2].map(n=>({aweme_id:author+n,desc:author+n})),hasMore:false,maxCursor:0};
-  },{intervals:{following:0,detail:0}});
-  const engine=new Engine(recoveryRepo,sources,async(item,raw,signal)=>{
-    assert.ok(!activeCount||activeAuthor===item.authorUid,'authors never overlap, including automatic sweep');
-    activeAuthor=item.authorUid;activeCount++;
-    calls.push([item.id,item.recoveryRound||0]);
-    try {
-      await sleep(3,signal);
-      if(!item.recoveryRound) throw Object.assign(new Error('HTTP 403'),{deferToSweep:true});
-      await recoveryRepo.commit({works:[{id:item.id,complete:true,files:[],sources:['following'],lastTask:item.taskId}]});
-    } finally {activeCount--;}
-  },{lock:mutex()});
-  await engine.start('following',authors);
-  assert.deepEqual(calls.map(c=>c[1]),[0,0,0,0,1,1,1,1]);
-  assert.equal(engine.task.authorProgress.A.status,'completed');
-  assert.equal(engine.task.authorProgress.B.status,'completed');
-  assert.equal(engine.task.run.checked,4);
-}
-console.log('OK: automatic following recovery preserves sequential authors and refreshes author completion state');
+console.log("OK: failed media and 429 release slots without a tail sweep; pause persists by journal without compaction");

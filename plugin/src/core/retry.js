@@ -16,8 +16,8 @@ export class RetryCoordinator {
     this.emit();
   }
   deferred(info={}){
-    const error=new Error(info.status===429?'此下载地址正在冷却，稍后补下':'本项已达到 2 秒处理预算，稍后补下');
-    Object.assign(error,{httpStatus:info.status||0,retryExhausted:true,deferToSweep:true,retryUntil:info.until||this.now(),rateKey:info.rateKey});return error;
+    const error=new Error(info.status===429?'此下载地址正在冷却，本轮已跳过':'本项已达到 2 秒处理预算，本轮已跳过');
+    Object.assign(error,{httpStatus:info.status||0,retryExhausted:true,retryUntil:info.until||this.now(),rateKey:info.rateKey});return error;
   }
   async ready(signal,{rateKey=null,deadline=Infinity}={}){
     while(true){

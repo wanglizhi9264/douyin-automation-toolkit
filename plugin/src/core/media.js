@@ -126,7 +126,7 @@ export function createMediaDownloader(
       return { upgraded: false, unchanged: true };
     const staged = [];
     const retired = [];
-    const addressRefreshed = Boolean(item.recoveryRound);
+    let addressRefreshed = false;
     let firstRequestDeadline = Infinity;
     let normalized = raw ? normalizeAweme(raw, 0, item.scope) : null;
     if (!normalized?.mediaParts?.length) {
@@ -139,11 +139,12 @@ export function createMediaDownloader(
         checkAbort(signal);
         const detail = await sources.detail(item.id, controller.signal);
         normalized = normalizeAweme(detail.aweme, 0, item.scope);
+        addressRefreshed = true;
       } catch (error) {
         checkAbort(signal);
         if (controller.signal.aborted)
-          throw Object.assign(new Error("刷新下载地址超过 2 秒，稍后补下"), { deferToSweep: true });
-        if (httpStatus(error) === 429) error.deferToSweep = true;
+          throw new Error("读取作品详情超过 2 秒，本轮已跳过");
+        if (httpStatus(error) === 429) error.mediaFailure = true;
         throw error;
       } finally { clearTimeout(timer); signal?.removeEventListener("abort", stop); }
     }
@@ -314,7 +315,6 @@ export function createMediaDownloader(
             {
               signal,
               label: "媒体下载",
-              retryForbidden: true,
               maxRetries: Math.max(0, 2 - requests - 1), deadline, rateKey: new URL(candidate.url).origin,
               onRetry: async (info) => {
                 if (attempts.length)
@@ -346,8 +346,10 @@ export function createMediaDownloader(
           )
             throw error;
           last = error;
-          if (!item.recoveryRound || error.retryExhausted) {
-            error.deferToSweep = true;
+          // An expired/denied address or a cooled origin should release the
+          // slot. A missing representation may have a usable next candidate.
+          if (![404, 410].includes(httpStatus(error)) || error.retryExhausted) {
+            error.mediaFailure = true;
             await saveDiagnostic(error);
             throw error;
           }
@@ -355,7 +357,7 @@ export function createMediaDownloader(
       }
       if (!result) {
         last ||= new Error("本项已达到 2 秒处理预算");
-        last.deferToSweep = true;
+        last.mediaFailure = true;
         await saveDiagnostic(last);
         throw last;
       }

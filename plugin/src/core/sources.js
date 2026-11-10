@@ -1,12 +1,12 @@
 import { parseLikedProfile } from "../shared/liked-sync.js";
 import { parseBookmarkedProfile } from "../shared/bookmarked-sync.js";
-import { sleep, checkAbort } from "./model.js";
+import { sleep, checkAbort, abortError } from "./model.js";
 import { countOrUnknown } from "./progress.js";
 import { httpError } from "../shared/http.js";
 import { RetryCoordinator } from "./retry.js";
 import { inspectPage, cursorKey, PaginationError } from "./pagination.js";
 
-// One page request at a time; media transfers use their own two-slot pool.
+// Keep listing and detail pacing independent, with a shared API 429 gate.
 export class Sources {
   constructor(
     request,
@@ -27,14 +27,15 @@ export class Sources {
     this.paginationDelays = paginationDelays;
     this.paginationWait = paginationWait;
     this.maxEmptyPages = maxEmptyPages;
-    this.chain = Promise.resolve();
-    this.nextAt = 0;
+    this.listLane = { tail: Promise.resolve(), nextAt: 0 };
+    this.detailLane = { tail: Promise.resolve(), nextAt: 0 };
     this.retry = new RetryCoordinator();
   }
   call(type, payload, signal, interval = 0) {
+    const lane = type === "FETCH_AWEME_DETAIL" ? this.detailLane : this.listLane;
     const operation = async () => {
       checkAbort(signal);
-      await sleep(Math.max(0, this.nextAt - Date.now()), signal);
+      await sleep(Math.max(0, lane.nextAt - Date.now()), signal);
       try {
         const result = await this.retry.run(
           async () => {
@@ -67,12 +68,23 @@ export class Sources {
           );
         return result;
       } finally {
-        this.nextAt = Date.now() + interval;
+        lane.nextAt = Date.now() + interval;
       }
     };
-    const result = this.chain.then(operation);
-    this.chain = result.catch(() => {});
-    return result;
+    if (signal?.aborted) return Promise.reject(abortError());
+    const result = lane.tail.then(operation);
+    lane.tail = result.catch(() => {});
+    if (!signal) return result;
+
+    // A cancelled caller must not wait for the request ahead of it. Keep the
+    // lane serialized internally so later callers still respect its pacing.
+    return new Promise((resolve, reject) => {
+      const stop = () => reject(abortError());
+      signal.addEventListener("abort", stop, { once: true });
+      result.then(resolve, reject).finally(() =>
+        signal.removeEventListener("abort", stop),
+      );
+    });
   }
   async profile(signal) {
     const raw = await this.call("GET_SELF_PROFILE", {}, signal);

@@ -155,7 +155,7 @@ function taskView() {
   const problem = !running && taskProblem(task,engine?.error || "");
   const failed = c.failed + c.unsupported;
   return `${back()}<div class="title-row"><h1>下载${esc(labels[task.scope])}</h1><span class="status">${status}</span></div>
-  ${problemHTML(problem || (!running && failed ? {text:`本轮有 ${number(failed)} 个作品未成功，原因见本地资料库。`,detail:"下次下载仍会检查最新列表，已完成作品会跳过。",action:"library",label:"查看资料库位置"} : null))}
+  ${problemHTML(problem || (!running && failed ? {text:`本轮有 ${number(failed)} 个作品未成功，可查看本地资料库中的失败原因。`,detail:"下次下载仍会检查最新列表，已完成作品会跳过。",action:"library",label:"查看资料库位置"} : null))}
   <div class="source-overview"><div><div class="overview-value" data-metric="platform-total">${task.scope === "following" ? number(task.authors.length) : values.displayTotal || (values.total === null ? "—" : number(values.total))}</div><div class="label">${task.scope === "following" ? "所选作者" : labels[task.scope] + "总数"}</div></div><div><div class="overview-value" data-metric="source-saved">${values.saved === null ? "—" : number(values.saved)}</div><div class="label" title="包含历史备份，已取消喜欢或收藏的作品仍保留，因此可能多于平台当前总数。">累计已备份 <span class="hint" tabindex="0" aria-label="包含历史备份，可能多于平台当前总数">ⓘ</span></div></div></div>
   <div class="task-total task-delta"><span class="delta-label">本次新增</span><span class="number" data-metric="new-downloads">+${number(c.saved)}</span>${c.upgraded ? `<span class="upgrade-count">升级 ${number(c.upgraded)}</span>` : ""}</div>
   ${task.scope === "following" ? `<div class="following-current">${esc(task.authors[[...active.values()][0]?.authorIndex ?? Math.min(task.cursor?.authorIndex || 0, task.authors.length - 1)]?.nickname || "")} · ${Math.min(task.authors.length, ([...active.values()][0]?.authorIndex ?? task.cursor?.authorIndex ?? 0) + 1)} / ${task.authors.length}</div>` : ""}
@@ -291,7 +291,7 @@ function render() {
     const count = shown.filter(a=>selected.has(a.uid)).length;
     $("selectAll").indeterminate = count > 0 && count < shown.length;
   }
-  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.7";
+  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.8";
   $("footState").textContent = engine?.busy ? currentStage() : "";
   renderFloating();
   for (const button of document.querySelectorAll("[data-quick]")) {
@@ -413,7 +413,7 @@ async function refreshTarget() {
       if (wasRunning && !engine.busy) {
         const message = engine.error || engine.task?.sourceErrors?.[0];
         if (message) notice(message);
-        scheduleReport();
+        if (engine.task?.status !== "paused") scheduleReport();
         scheduleMeasurement();
       }
       wasRunning = engine.busy;
