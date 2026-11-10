@@ -1115,3 +1115,33 @@ console.log("OK: cooling queue survives end of discovery, 429 wait is pausable, 
   assert.equal(engine.task.status, "partial");
 }
 console.log("OK: idle slots retry repeatedly during scan, prioritize new work, and count works once");
+
+// A real media 403 retains its candidate through ten fresh-address attempts.
+{
+  const forbiddenRepo = await Repository.open(memoryFS().target);
+  const calls = [];
+  const engine = new Engine(forbiddenRepo, fakeSources(1), async (item, raw) => {
+    calls.push(item.idleRetryCount || 0);
+    if (item.idleRetryCount) assert.equal(raw, undefined);
+    throw Object.assign(new Error("HTTP 403"), { mediaFailure: true });
+  }, { lock: mutex() });
+  const realNow = Date.now;
+  let advanced = 0;
+  Date.now = () => realNow() + advanced;
+  try {
+    const done = engine.start("liked");
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await waitFor(() => calls.length === attempt + 1 && engine.idleRetries.size === 1);
+      advanced += 31_000;
+    }
+    await done;
+    assert.deepEqual(calls, Array.from({ length: 11 }, (_, i) => i));
+    assert.equal(engine.task.run.checked, 1);
+    assert.equal(engine.task.run.failed, 1);
+    assert.match(engine.task.items["1"].error, /10 次 403 重试上限/);
+  } finally {
+    Date.now = realNow;
+    await engine.pause();
+  }
+}
+console.log("OK: media 403 requeues exactly ten times after the initial attempt");

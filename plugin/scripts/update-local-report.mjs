@@ -47,11 +47,11 @@ const outputArg = process.argv.indexOf("--output"),
       : path.join(root, "本地库.html");
 if (output === path.join(root, "本地库.html")) {
   const old = await io.read("本地库.html");
-  if (old && !old.includes('data-report-version="0.8.10"')) {
+  if (old && !old.includes('data-report-version="0.8.11"')) {
     const backup = path.join(
       root,
       "data/.appdata/backups",
-      `report-before-0.8.10-${Date.now()}.html`,
+      `report-before-0.8.11-${Date.now()}.html`,
     );
     await fs.mkdir(path.dirname(backup), { recursive: true });
     await fs.copyFile(output, backup, fs.constants.COPYFILE_EXCL);

@@ -1,6 +1,6 @@
 # 当前架构与业务规则
 
-更新于 2026-11-10。插件基线 **0.8.10**。详细行为以 [产品规格 v0.3](plugin-product-spec-v0.3.md) 和 [技术实现基线](implementation-spec-0.8.7.md) 与 [0.8.8 实现变更](plugin-release-0.8.8.md) 和 [0.8.10 队列策略](plugin-release-0.8.10.md) 为准；本文作为架构入口。早期审查与旧模块设计保存在 [历史架构](architecture-design-legacy.md)，其中“当前”不再代表本版本。
+更新于 2026-11-10。插件基线 **0.8.11**。详细行为以 [产品规格 v0.3](plugin-product-spec-v0.3.md) 和 [技术实现基线](implementation-spec-0.8.7.md) 与 [0.8.8 实现变更](plugin-release-0.8.8.md) 和 [0.8.10 队列策略](plugin-release-0.8.10.md) 和 [0.8.11 修订](plugin-release-0.8.11.md) 为准；本文作为架构入口。早期审查与旧模块设计保存在 [历史架构](architecture-design-legacy.md)，其中“当前”不再代表本版本。
 
 ## 1. 分层
 

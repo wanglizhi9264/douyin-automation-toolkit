@@ -355,7 +355,6 @@ export function createMediaDownloader(
           // slot. A missing representation may have a usable next candidate.
           if (![404, 410].includes(httpStatus(error)) || error.retryExhausted) {
             error.mediaFailure = true;
-            error.addressRefreshed = addressRefreshed;
             await saveDiagnostic(error);
             throw error;
           }

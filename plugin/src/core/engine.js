@@ -12,6 +12,8 @@ import { profileTotal } from "./progress.js";
 import { httpStatus } from "../shared/http.js";
 import { cursorKey, PaginationError } from "./pagination.js";
 
+const MAX_MEDIA_403_RETRIES = 10;
+
 export class Engine {
   constructor(
     repo,
@@ -628,20 +630,25 @@ export class Engine {
                   if (error.unsupported) run.unsupported++;
                   else run.failed++;
                 }
-                const expiredAddress =
-                  status === 403 && error.mediaFailure && !error.addressRefreshed;
+                const mediaForbidden = status === 403 && error.mediaFailure && !signal.aborted;
+                if (mediaForbidden)
+                  item.media403Failures = (item.media403Failures || 0) + 1;
+                const retryForbidden = mediaForbidden &&
+                  item.media403Failures <= MAX_MEDIA_403_RETRIES;
                 const temporary =
                   ![403, 404, 410].includes(status) &&
                   (error.retryable === true || error.retryExhausted ||
                     [408, 425, 429, 500, 502, 503, 504].includes(status));
                 const cooldownScheduled = !retryOnly && !continuing &&
-                  item.state === "failed" && (expiredAddress || temporary);
+                  item.state === "failed" && (retryForbidden || temporary);
                 if (cooldownScheduled) {
                   const cooldown = Math.min(
                     30_000,
                     1000 * 2 ** Math.min(item.idleRetryCount || 0, 5),
                   );
                   item.retryAt = Math.max(Date.now() + cooldown, item.retryAt || 0);
+                } else if (mediaForbidden && item.media403Failures > MAX_MEDIA_403_RETRIES) {
+                  item.error += `（已达 ${MAX_MEDIA_403_RETRIES} 次 403 重试上限）`;
                 }
                 await this.update({ run: { ...run } }, [item]);
                 if (!signal.aborted && cooldownScheduled)

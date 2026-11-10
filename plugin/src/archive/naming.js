@@ -28,7 +28,9 @@ function clip(value, chars, bytes) {
   return result.trim();
 }
 export function readableTitle(value) {
-  const raw = typeof value === "string" ? value.normalize("NFC") : "";
+  const raw = typeof value === "string"
+    ? value.replace(/\p{Cf}/gu, "").normalize("NFC")
+    : "";
   const withoutLinks = raw
     .replace(/https?:\/\/\S+/gi, " ")
     .replace(/@[^\s@#，。！？,!?]+/g, " ");
@@ -68,10 +70,14 @@ function sourceToken(id) {
 export function readableBase(work, scope) {
   const naming = work.naming;
   if (!validNaming(naming))
-    return clip(clean(String(work.id)), 64, 192) || "未知作品";
-  const suffix = ` [${naming.token}]`;
-  const prefix =
+    return clip(clean(String(work.id).replace(/\p{Cf}/gu, "")), 64, 192) || "未知作品";
+  const original =
     scope === "following" ? naming.title : `${naming.author} - ${naming.title}`;
+  const prefix = clean(original.replace(/\p{Cf}/gu, "")) || "未命名作品";
+  // A legacy name can collapse onto another work after removing invisible
+  // format characters. Use its full ID when that path needs repair.
+  const token = /\p{Cf}/u.test(original) ? sourceToken(work.id) : naming.token;
+  const suffix = ` [${token}]`;
   return (
     clip(prefix, 80, Math.max(1, 220 - encoder.encode(suffix).length)).replace(
       /[.\s]+$/g,
@@ -118,7 +124,7 @@ export function reserveWorkName(repo, work) {
   const base = {
     version: 1,
     title: readableTitle(work.desc),
-    author: clean(clip(clean(work.authorName), 14, 56)) || "未知作者",
+    author: clean(clip(clean(work.authorName).replace(/\p{Cf}/gu, ""), 14, 56)) || "未知作者",
   };
   for (
     let length = Math.min(8, token.length);

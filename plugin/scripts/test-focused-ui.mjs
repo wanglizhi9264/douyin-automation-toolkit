@@ -295,6 +295,7 @@ try {
   denyRetryMedia = true;
   await page.locator("[data-action=liked]").click();
   await page.getByText("候补重试 1 项", { exact: false }).waitFor({ timeout: 8000 });
+  denyRetryMedia = false;
   await page.waitForFunction(
     () => {
       const b = document.querySelector("[data-action=download]");
@@ -325,7 +326,7 @@ try {
   assert.equal(upgraded.width, 1080);
   assert.equal(upgraded.complete, true);
   assert.equal(upgraded.oldExists, false);
-  assert.equal(upgraded.unique, 5);
+  assert.equal(upgraded.unique, 6);
   const beforeRetry = await page.evaluate(() => window.likedPageRequests);
   denyRetryMedia = false;
   await page.locator("[data-action=download]").click();
@@ -350,7 +351,7 @@ try {
   );
   assert.equal(
     await page.locator('[data-metric="new-downloads"]').innerText(),
-    "+1",
+    "+0",
   );
   await page.screenshot({ path: output + "/douyin-v077-retry-complete.png" });
   console.log(

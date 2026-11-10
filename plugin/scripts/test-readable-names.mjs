@@ -154,3 +154,24 @@ assert.equal(clipped.naming.title, "a".repeat(29));
 assert.equal(clipped.naming.author, "b".repeat(13));
 assert.ok(readableBase(clipped, "liked").includes(" ["));
 assert.equal(readableTitle("...隐藏标题"), "隐藏标题");
+
+// Chromium's local File System Access handles reject format characters,
+// including the invisible joiner in a combined emoji.
+const withJoiner = {
+  id: "1234567890123456",
+  authorName: "作者🏊🏻‍♀️",
+  authorUid: "12345",
+  desc: "训练👩‍👩‍👧‍👧",
+  authorFolder: "data/我的关注/作者🏊🏻‍♀️_12345",
+  naming: { version: 1, title: "训练👩‍👩‍👧‍👧", author: "作者🏊🏻‍♀️", token: "90123456" },
+};
+const part = { partId: "video-1", kind: "video" };
+for (const scope of ["liked", "bookmarked", "following"]) {
+  const output = sourceTargetPath(withJoiner, part, scope);
+  assert.doesNotMatch(output, /\p{Cf}/u);
+  assert.ok(output.endsWith("[1234567890123456].mp4"), "legacy repair uses the full unique ID");
+}
+const newName = reserveWorkName({ state: { works: {} } }, { ...withJoiner, naming: undefined });
+assert.doesNotMatch(newName.author + newName.title, /\p{Cf}/u);
+assert.equal(newName.token, "90123456", "new names retain the normal short ID");
+assert.match(withJoiner.desc, /\u200d/, "original display description remains intact");

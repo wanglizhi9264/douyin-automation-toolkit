@@ -3,6 +3,7 @@ import { readableBase } from "./naming.js";
 export function pathName(value, fallback = "未命名作者") {
   const name = String(value || "")
     .normalize("NFC")
+    .replace(/\p{Cf}/gu, "")
     .replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, "_")
     .replace(/[.\s]+$/g, "")
     .trim();
@@ -12,7 +13,7 @@ export function pathName(value, fallback = "未命名作者") {
 }
 export function authorFolder(work) {
   const existing = work.authorFolder;
-  if (existing && !existing.includes("..")) {
+  if (existing && !existing.includes("..") && !/\p{Cf}/u.test(existing)) {
     if (existing.startsWith("data/我的关注/")) return existing;
     if (existing.startsWith("data/关注/"))
       return existing.replace("data/关注/", "data/我的关注/");
