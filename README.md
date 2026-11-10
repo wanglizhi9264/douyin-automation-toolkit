@@ -1,10 +1,10 @@
 # 抖音备份工具
 
-Chrome/Edge MV3 扩展，当前版本 **0.8.8**，使用抖音网页的登录态备份喜欢、收藏和所选关注作者作品。当前安装和使用以 [安装说明](plugin/INSTALL.md) 与 [0.8.8 更新说明](docs/plugin-release-0.8.8.md) 为准。后端诊断工具独立运行。
+Chrome/Edge MV3 扩展，当前版本 **0.8.9**，使用抖音网页的登录态备份喜欢、收藏和所选关注作者作品。当前安装和使用以 [安装说明](plugin/INSTALL.md) 与 [0.8.9 更新说明](docs/plugin-release-0.8.9.md) 为准。后端诊断工具独立运行。
 
 当前开发文档：[产品规格 v0.3](docs/plugin-product-spec-v0.3.md) · [技术实现规格 0.8.7](docs/implementation-spec-0.8.7.md) · [测试与发布](docs/test-release-runbook.md)。
 
-## 0.8.8 使用入口
+## 0.8.9 使用入口
 
 1. 在 `chrome://extensions` 或 `edge://extensions` 开启开发者模式，加载仓库的 `plugin/` 目录。
 2. 打开并登录抖音，点击悬浮图标，选择本地备份文件夹。

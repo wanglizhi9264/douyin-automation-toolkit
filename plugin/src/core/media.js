@@ -143,7 +143,9 @@ export function createMediaDownloader(
       } catch (error) {
         checkAbort(signal);
         if (controller.signal.aborted)
-          throw new Error("读取作品详情超过 2 秒，本轮已跳过");
+          throw Object.assign(new Error("读取作品详情超过 2 秒"), {
+            retryable: true, retryUntil: retry.info?.until,
+          });
         if (httpStatus(error) === 429) error.mediaFailure = true;
         throw error;
       } finally { clearTimeout(timer); signal?.removeEventListener("abort", stop); }
@@ -221,6 +223,7 @@ export function createMediaDownloader(
       if (upgrading && !candidates.length) continue;
       let result, last, path, selected, rank;
       let requests = 0;
+      const requestLimit = item.idleRetryCount ? 1 : 2;
       const deadline = Math.min(firstRequestDeadline, retry.now() + 2000);
       firstRequestDeadline = Infinity;
       const attempts = [...(work.diagnostics[part.partId]?.attempts || [])];
@@ -261,7 +264,7 @@ export function createMediaDownloader(
         });
       };
       for (const [index, candidate] of candidates.entries()) {
-        if (requests >= 2 || retry.now() >= deadline) break;
+        if (requests >= requestLimit || retry.now() >= deadline) break;
         checkAbort(signal);
         rank = index + 1;
         const variant = safe(
@@ -315,7 +318,9 @@ export function createMediaDownloader(
             {
               signal,
               label: "媒体下载",
-              maxRetries: Math.max(0, 2 - requests - 1), deadline, rateKey: new URL(candidate.url).origin,
+              maxRetries: 0,
+              deadline,
+              rateKey: new URL(candidate.url).origin,
               onRetry: async (info) => {
                 if (attempts.length)
                   Object.assign(attempts[attempts.length - 1], {
@@ -350,6 +355,7 @@ export function createMediaDownloader(
           // slot. A missing representation may have a usable next candidate.
           if (![404, 410].includes(httpStatus(error)) || error.retryExhausted) {
             error.mediaFailure = true;
+            error.addressRefreshed = addressRefreshed;
             await saveDiagnostic(error);
             throw error;
           }

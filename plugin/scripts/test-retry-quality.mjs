@@ -133,7 +133,7 @@ const bestRepo = repo(),
   bestClock = clock({rateBaseMs: 100}),
   requests = [];
 let rateOnce = true;
-await createMediaDownloader(
+const downloadBest = createMediaDownloader(
   bestRepo,
   { retry: bestClock.retry },
   {
@@ -146,7 +146,11 @@ await createMediaDownloader(
       return { size: 10, contentType: "video/mp4" };
     },
   },
-)(item, raw, signal, async () => {});
+);
+await assert.rejects(() => downloadBest(item, raw, signal, async () => {}), e => e.httpStatus === 429);
+assert.equal(bestClock.time, 0, "a rate-limited attempt releases the media slot");
+await bestClock.retry.wait(100);
+await downloadBest({ ...item, idleRetryCount: 1 }, raw, signal, async () => {});
 assert.deepEqual(
   requests,
   ["https://media.test/best", "https://media.test/best"],

@@ -358,6 +358,23 @@ export class Engine {
               this.emit();
             }
           };
+          // These IDs are already recorded as failed. Keep cooling retries
+          // outside the fresh-work queue so they cannot consume its capacity.
+          const idleRetries = new Map();
+          let currentAuthorIndex = this.task.cursor?.authorIndex || 0;
+          let authorScanEnded = false;
+          const readyRetry = () => {
+            if (this.producerFinished || authorScanEnded) return null;
+            const now = Date.now();
+            for (const [id, retry] of idleRetries)
+              if (
+                retry.at <= now &&
+                !this.active.has(id) &&
+                (scope !== "following" || retry.authorIndex === currentAuthorIndex)
+              )
+                return id;
+            return null;
+          };
           const produce = async () => {
             try {
               if (retryOnly) return;
@@ -411,6 +428,8 @@ export class Engine {
                 }
                 this.profile = currentProfile;
                 const authorIndex = this.task.cursor?.authorIndex || 0;
+                currentAuthorIndex = authorIndex;
+                authorScanEnded = false;
                 const page = await this.sources.page(
                   this.task,
                   profile,
@@ -443,10 +462,13 @@ export class Engine {
                   scope === "following" &&
                   (page.cursor?.authorIndex || 0) > authorIndex
                 ) {
+                  authorScanEnded = true;
                   while (this.queue.length || this.active.size) {
                     checkAbort(signal);
                     await sleep(60, signal);
                   }
+                  for (const [id, retry] of idleRetries)
+                    if (retry.authorIndex === authorIndex) idleRetries.delete(id);
                   const author = this.task.authors[authorIndex];
                   const items = Object.values(this.task.items).filter(
                     (item) => item.authorUid === author.uid,
@@ -497,13 +519,25 @@ export class Engine {
                 await sleep(60, signal);
                 continue;
               }
-              const id = this.queue.shift();
+              const freshId = this.queue.shift();
+              const retryId = freshId ? null : readyRetry();
+              const id = freshId || retryId;
               if (!id) {
                 if (this.producerFinished) return;
                 await sleep(60, signal);
                 continue;
               }
               let item = { ...this.task.items[id] };
+              if (retryId) {
+                idleRetries.delete(id);
+                item = {
+                  ...item,
+                  idleRetryCount: (item.idleRetryCount || 0) + 1,
+                  state: "queued",
+                  retryAt: null,
+                };
+                run.failed--;
+              }
               this.active.set(id, { ...item, loaded: 0, total: 0 });
               this.emit();
               try {
@@ -526,7 +560,7 @@ export class Engine {
                 } else {
                   attempted.add(id);
                   item.state = "downloading";
-                  await this.update({}, [item]);
+                  await this.update(retryId ? { run: { ...run } } : {}, [item]);
                   const result = await this.download(
                     item,
                     this.raw.get(id),
@@ -563,9 +597,10 @@ export class Engine {
                 item.error = "";
                 await this.update({ run: { ...run } }, [item]);
               } catch (error) {
+                const status = httpStatus(error);
                 const fatal =
                   this.repo.poisoned ||
-                  (httpStatus(error) === 429 && !error.mediaFailure) ||
+                  (status === 429 && !error.mediaFailure) ||
                   [
                     "QuotaExceededError",
                     "NotAllowedError",
@@ -580,7 +615,7 @@ export class Engine {
                     ? "unsupported"
                     : "failed";
                 item.error =
-                  signal.aborted && httpStatus(error) !== 429
+                  signal.aborted && status !== 429
                     ? ""
                     : item.upgrade && this.repo.state.works[id]?.complete
                       ? "画质升级未成功，原文件保留：" + error.message
@@ -589,6 +624,23 @@ export class Engine {
                 if (!signal.aborted) {
                   if (error.unsupported) run.unsupported++;
                   else run.failed++;
+                }
+                const expiredAddress =
+                  status === 403 && error.mediaFailure && !error.addressRefreshed;
+                const temporary =
+                  ![403, 404, 410].includes(status) &&
+                  (error.retryable === true || error.retryExhausted ||
+                    [408, 425, 429, 500, 502, 503, 504].includes(status));
+                if (
+                  !retryOnly && !continuing &&
+                  item.state === "failed" && (expiredAddress || temporary)
+                ) {
+                  const cooldown = Math.min(
+                    30_000,
+                    1000 * 2 ** Math.min(item.idleRetryCount || 0, 5),
+                  );
+                  item.retryAt = Math.max(Date.now() + cooldown, item.retryAt || 0);
+                  idleRetries.set(id, { at: item.retryAt, authorIndex: item.authorIndex });
                 }
                 await this.update({ run: { ...run } }, [item]);
                 if (fatal) throw error;

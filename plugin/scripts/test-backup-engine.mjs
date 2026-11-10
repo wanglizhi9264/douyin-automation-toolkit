@@ -1015,11 +1015,13 @@ console.log(
   const calls = [];
   const engine = new Engine(failureRepo, source, async (item) => {
     calls.push(item.id);
-    if (item.id === "1") throw new Error("HTTP 403");
+    if (item.id === "1") throw Object.assign(new Error("HTTP 403"), { mediaFailure: true });
     if (item.id === "3") throw Object.assign(new Error("HTTP 429"), {
       mediaFailure: true,
       retryUntil: Date.now() + 60_000,
     });
+    // The 403 becomes eligible while the final fresh download is still active.
+    if (item.id === "6") await sleep(1150);
     await failureRepo.commit({ works: [{ id: item.id, complete: true,
       files: [], sources: [item.scope], lastTask: item.taskId }] });
   }, { lock: mutex(), capacity: 4 });
@@ -1047,3 +1049,54 @@ console.log(
   assert.ok(engine.counts.pending > 0);
 }
 console.log("OK: failed media and 429 release slots without a tail sweep; pause persists by journal without compaction");
+
+// Retry can fill idle slots repeatedly while discovery is still in flight.
+// Fresh queued work runs first, and terminal failures never occupy retry slots.
+{
+  const retryRepo = await Repository.open(memoryFS().target);
+  let finishDiscovery;
+  const scanning = new Promise(resolve => { finishDiscovery = resolve; });
+  const source = {
+    profile: async () => profile,
+    async page(task) {
+      if (!task.cursor?.offset) return {
+        items: [{ id: "flaky" }, { id: "gone" }, { id: "new" }],
+        cursor: { offset: 3 },
+        done: false,
+      };
+      await scanning;
+      return { items: [], cursor: { offset: 4 }, done: true };
+    },
+  };
+  const calls = [];
+  let flakyAttempts = 0;
+  const engine = new Engine(retryRepo, source, async (item, raw) => {
+    calls.push(item.id);
+    if (item.id === "gone") throw new Error("HTTP 404");
+    if (item.id === "flaky") {
+      flakyAttempts++;
+      if (item.idleRetryCount) assert.equal(raw, undefined);
+      if (flakyAttempts < 3) throw Object.assign(new Error("HTTP 503"), { retryable: true });
+    }
+    await retryRepo.commit({ works: [{ id: item.id, complete: true,
+      files: [], sources: [item.scope], lastTask: item.taskId }] });
+  }, { lock: mutex() });
+  const done = engine.start("liked");
+  try {
+    for (let i = 0; i < 100 && !retryRepo.state.works.flaky?.complete; i++)
+      await sleep(50);
+    assert.ok(retryRepo.state.works.flaky?.complete, "second idle retry succeeds before discovery ends");
+    assert.equal(engine.task.sourceDone, false);
+    assert.deepEqual(calls.filter(id => id === "gone"), ["gone"]);
+    assert.ok(calls.indexOf("new") < calls.lastIndexOf("flaky"));
+  } finally {
+    finishDiscovery();
+    await done;
+  }
+  assert.equal(flakyAttempts, 3);
+  assert.equal(engine.task.run.checked, 3);
+  assert.equal(engine.task.run.saved, 2);
+  assert.equal(engine.task.run.failed, 1);
+  assert.equal(engine.task.status, "partial");
+}
+console.log("OK: idle slots retry repeatedly during scan, prioritize new work, and count works once");

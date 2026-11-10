@@ -291,7 +291,7 @@ function render() {
     const count = shown.filter(a=>selected.has(a.uid)).length;
     $("selectAll").indeterminate = count > 0 && count < shown.length;
   }
-  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.8";
+  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.9";
   $("footState").textContent = engine?.busy ? currentStage() : "";
   renderFloating();
   for (const button of document.querySelectorAll("[data-quick]")) {

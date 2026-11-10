@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音备份",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "description": "将喜欢、收藏和所选关注作者的作品备份到本地文件夹，支持并行下载、断点继续和闲时整理。",
   "action": {
     "default_title": "抖音备份",
