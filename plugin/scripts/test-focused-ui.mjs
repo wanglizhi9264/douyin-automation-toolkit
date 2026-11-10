@@ -294,6 +294,7 @@ try {
   await page.screenshot({ path: output + "/minimal-home.png" });
   denyRetryMedia = true;
   await page.locator("[data-action=liked]").click();
+  await page.getByText("候补重试 1 项", { exact: false }).waitFor({ timeout: 8000 });
   await page.waitForFunction(
     () => {
       const b = document.querySelector("[data-action=download]");

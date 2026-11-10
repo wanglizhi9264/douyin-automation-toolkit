@@ -26,6 +26,7 @@ export class Engine {
     this.capacity = capacity;
     this.listeners = new Set();
     this.active = new Map();
+    this.idleRetries = new Map();
     this.task = null;
     this.queue = [];
     this.busy = false;
@@ -55,6 +56,7 @@ export class Engine {
     if (!this.lock) throw new Error("浏览器不支持备份库锁，请升级 Chrome");
     this.busy = true;
     this.error = "";
+    this.idleRetries.clear();
     this.controller = new AbortController();
     this.task = newTask(scope, this.repo.state.owner?.uid || "", authors);
     this.task.status = "starting";
@@ -360,19 +362,20 @@ export class Engine {
           };
           // These IDs are already recorded as failed. Keep cooling retries
           // outside the fresh-work queue so they cannot consume its capacity.
-          const idleRetries = new Map();
-          let currentAuthorIndex = this.task.cursor?.authorIndex || 0;
-          let authorScanEnded = false;
+          const idleRetries = this.idleRetries;
+          let changingAuthor = false;
           const readyRetry = () => {
-            if (this.producerFinished || authorScanEnded) return null;
+            if (changingAuthor && !this.producerFinished) return null;
             const now = Date.now();
-            for (const [id, retry] of idleRetries)
+            const activeAuthor = this.active.values().next().value?.authorIndex;
+            for (const [id, retry] of idleRetries) {
               if (
                 retry.at <= now &&
                 !this.active.has(id) &&
-                (scope !== "following" || retry.authorIndex === currentAuthorIndex)
-              )
-                return id;
+                (scope !== "following" || activeAuthor === undefined ||
+                  retry.authorIndex === activeAuthor)
+              ) return id;
+            }
             return null;
           };
           const produce = async () => {
@@ -428,8 +431,7 @@ export class Engine {
                 }
                 this.profile = currentProfile;
                 const authorIndex = this.task.cursor?.authorIndex || 0;
-                currentAuthorIndex = authorIndex;
-                authorScanEnded = false;
+                changingAuthor = false;
                 const page = await this.sources.page(
                   this.task,
                   profile,
@@ -462,13 +464,11 @@ export class Engine {
                   scope === "following" &&
                   (page.cursor?.authorIndex || 0) > authorIndex
                 ) {
-                  authorScanEnded = true;
+                  changingAuthor = true;
                   while (this.queue.length || this.active.size) {
                     checkAbort(signal);
                     await sleep(60, signal);
                   }
-                  for (const [id, retry] of idleRetries)
-                    if (retry.authorIndex === authorIndex) idleRetries.delete(id);
                   const author = this.task.authors[authorIndex];
                   const items = Object.values(this.task.items).filter(
                     (item) => item.authorUid === author.uid,
@@ -523,8 +523,11 @@ export class Engine {
               const retryId = freshId ? null : readyRetry();
               const id = freshId || retryId;
               if (!id) {
-                if (this.producerFinished) return;
-                await sleep(60, signal);
+                if (this.producerFinished && !idleRetries.size && !this.active.size)
+                  return;
+                // Once the scanner is done, cooling items keep the run alive.
+                // The wait is interruptible and takes no media slot.
+                await sleep(this.producerFinished ? 120 : 60, signal);
                 continue;
               }
               let item = { ...this.task.items[id] };
@@ -631,18 +634,18 @@ export class Engine {
                   ![403, 404, 410].includes(status) &&
                   (error.retryable === true || error.retryExhausted ||
                     [408, 425, 429, 500, 502, 503, 504].includes(status));
-                if (
-                  !retryOnly && !continuing &&
-                  item.state === "failed" && (expiredAddress || temporary)
-                ) {
+                const cooldownScheduled = !retryOnly && !continuing &&
+                  item.state === "failed" && (expiredAddress || temporary);
+                if (cooldownScheduled) {
                   const cooldown = Math.min(
                     30_000,
                     1000 * 2 ** Math.min(item.idleRetryCount || 0, 5),
                   );
                   item.retryAt = Math.max(Date.now() + cooldown, item.retryAt || 0);
-                  idleRetries.set(id, { at: item.retryAt, authorIndex: item.authorIndex });
                 }
                 await this.update({ run: { ...run } }, [item]);
+                if (!signal.aborted && cooldownScheduled)
+                  idleRetries.set(id, { at: item.retryAt, authorIndex: item.authorIndex });
                 if (fatal) throw error;
               } finally {
                 this.raw.delete(id);
@@ -663,6 +666,25 @@ export class Engine {
             }
           };
           await checkResults([produce(), consume(), consume()]);
+          if (scope === "following" && !signal.aborted && this.task.sourceDone) {
+            const byAuthor = new Map();
+            for (const item of Object.values(this.task.items)) {
+              const totals = byAuthor.get(item.authorUid) || { checked: 0, failed: 0 };
+              totals.checked++;
+              if (["failed", "unsupported"].includes(item.state)) totals.failed++;
+              byAuthor.set(item.authorUid, totals);
+            }
+            const authorProgress = { ...this.task.authorProgress };
+            for (const author of this.task.authors) {
+              const totals = byAuthor.get(author.uid) || { checked: 0, failed: 0 };
+              authorProgress[author.uid] = {
+                ...totals,
+                status: totals.failed ? "partial" : "completed",
+                at: new Date().toISOString(),
+              };
+            }
+            await this.update({ authorProgress });
+          }
           // Each completed change already has a durable journal entry.
           // Pausing only needs to drain in-flight writes and save the status.
           if (!signal.aborted) await this.repo.compact();
@@ -680,6 +702,7 @@ export class Engine {
         this.sources.onRetry = null;
         this.sources.onPaginationRetry = null;
         this.busy = false;
+        this.idleRetries.clear();
         this.active.clear();
         this.emit();
       });

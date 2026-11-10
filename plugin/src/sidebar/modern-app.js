@@ -116,7 +116,7 @@ function sourceNumbers(scope, task = repo?.latestTask(scope)) {
   });
 }
 function currentStage() {
-  return taskStage(engine?.task, {running:engine?.busy,active:engine?.active,retry:engine?.sources.retry?.info});
+  return taskStage(engine?.task, {running:engine?.busy,active:engine?.active,retry:engine?.sources.retry?.info,retryCandidates:engine?.idleRetries.size});
 }
 function problemHTML(problem) {
   return problem ? `<div class="task-problem" role="status" title="${esc(problem.detail)}"><span>${esc(problem.text)}</span>${problem.action ? `<button class="link" data-action="${problem.action}" ${busy() ? "disabled" : ""}>${esc(problem.label)}</button>` : ""}</div>` : "";
@@ -143,10 +143,12 @@ function taskView() {
     active = engine?.active || new Map(),
     running = engine?.busy;
   const retry = running && engine.sources.retry?.info;
+  const candidates = running ? [...engine.idleRetries.values()] : [];
+  const nextRetry = candidates.reduce((next, item) => Math.min(next, item.at), Infinity);
   const ratio = c.read
     ? Math.min(
         100,
-        ((c.saved + (c.upgraded || 0) + c.existing + c.failed + c.unsupported) /
+        ((c.saved + (c.upgraded || 0) + c.existing + c.failed + c.unsupported - candidates.length) /
           c.read) *
           100,
       )
@@ -165,14 +167,15 @@ function taskView() {
   <div class="stats task-stats">${[
     ["已检查", c.read],
     ["已跳过", c.existing],
-    ["待下载", c.pending],
-    ["未成功", c.failed + c.unsupported],
+    ["待下载", c.pending + candidates.length],
+    ["未成功", Math.max(0, failed - candidates.length)],
   ]
     .map(
       ([name, value]) =>
         `<div><div class="stat-value">${number(value)}</div><div class="stat-name">${name}</div></div>`,
     )
     .join("")}</div>
+  ${candidates.length ? `<div class="retry-notice">候补重试 ${number(candidates.length)} 项 · ${nextRetry > Date.now() ? `最快 ${Math.ceil((nextRetry - Date.now()) / 1000)} 秒后可重试` : "等待空闲下载位"}</div>` : ""}
   ${active.size ? '<div class="section-head"><h2>当前下载</h2></div>' : ""}
   <div id="transfers">${[...active.values()].map(transferHTML).join("")}</div>
   <div class="task-controls"><button title="${running ? "下载依赖当前抖音标签页；关闭或刷新页面会中断，已保存作品保留。" : "从最新列表检查，已有最高画质跳过，未完成的继续下载。"}" class="${running ? "secondary-btn" : "primary"} wide" data-action="${running ? "pause" : "download"}" ${!running && busy() ? "disabled" : ""}>${running ? "暂停下载" : "下载"}</button></div>`;
@@ -291,7 +294,7 @@ function render() {
     const count = shown.filter(a=>selected.has(a.uid)).length;
     $("selectAll").indeterminate = count > 0 && count < shown.length;
   }
-  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.9";
+  $("account").textContent = repo?.state.owner?.nickname || "本地备份 · v0.8.10";
   $("footState").textContent = engine?.busy ? currentStage() : "";
   renderFloating();
   for (const button of document.querySelectorAll("[data-quick]")) {
@@ -320,8 +323,13 @@ function renderFloating() {
     : "展开抖音备份 · 可拖动";
   if (engine?.busy) $("floating").title = `${currentStage()} · ${ring.label} · 点击查看进度`;
 }
+function transferMeta(item) {
+  return (item.idleRetryCount ? `重试 ${item.idleRetryCount} · ` : "") +
+    (item.authorName || "准备媒体") +
+    (item.parts ? ` · ${item.part}/${item.parts} 段` : "");
+}
 function transferHTML(item) {
-  return `<div class="transfer" data-transfer="${esc(item.id)}"><div class="transfer-title">${esc(item.desc || item.id)}</div><div class="transfer-meta"><span data-transfer-meta>${esc(item.authorName || "准备媒体")}${item.parts ? ` · ${item.part}/${item.parts} 段` : ""}</span><span data-transfer-bytes>${bytes(item.loaded)}${item.total ? " / " + bytes(item.total) : ""}</span></div><div class="mini-bar"><i style="width:${item.total ? Math.min(100, (item.loaded / item.total) * 100) : 0}%"></i></div></div>`;
+  return `<div class="transfer" data-transfer="${esc(item.id)}"><div class="transfer-title">${esc(item.desc || item.id)}</div><div class="transfer-meta"><span data-transfer-meta>${esc(transferMeta(item))}</span><span data-transfer-bytes>${bytes(item.loaded)}${item.total ? " / " + bytes(item.total) : ""}</span></div><div class="mini-bar"><i style="width:${item.total ? Math.min(100, (item.loaded / item.total) * 100) : 0}%"></i></div></div>`;
 }
 function refreshStageText() {
   const stage = currentStage();
@@ -350,8 +358,7 @@ function scheduleProgress() {
         continue;
       }
       row.querySelector("[data-transfer-meta]").textContent =
-        (item.authorName || "准备媒体") +
-        (item.parts ? ` · ${item.part}/${item.parts} 段` : "");
+        transferMeta(item);
       row.querySelector("[data-transfer-bytes]").textContent =
         bytes(item.loaded) + (item.total ? " / " + bytes(item.total) : "");
       row.querySelector(".mini-bar i").style.width =
@@ -923,7 +930,7 @@ window.addEventListener("beforeunload", (event) => {
 });
 setInterval(() => void refreshTarget(), 3000);
 setInterval(() => {
-  if ((engine?.busy || authorsLoading) && (engine.sources.retry?.info || engine.task?.recovery?.status === "waiting"))
+  if ((engine?.busy || authorsLoading) && (engine.sources.retry?.info || engine.idleRetries.size || engine.task?.recovery?.status === "waiting"))
     schedule();
 }, 1000);
 render();

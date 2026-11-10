@@ -1008,30 +1008,45 @@ console.log(
   );
 }
 
-// Permanent failures and cooled origins must not create an end-of-run queue.
+// Discovery can finish before the first cooldown. Keep retrying until
+// success or a terminal failure, and never dispatch a rate-limited item early.
 {
-  const failureRepo = await Repository.open(memoryFS().target);
-  const source = fakeSources(6);
+  const retryRepo = await Repository.open(memoryFS().target);
   const calls = [];
-  const engine = new Engine(failureRepo, source, async (item) => {
+  const engine = new Engine(retryRepo, fakeSources(3), async (item) => {
     calls.push(item.id);
-    if (item.id === "1") throw Object.assign(new Error("HTTP 403"), { mediaFailure: true });
-    if (item.id === "3") throw Object.assign(new Error("HTTP 429"), {
+    if (item.id === "1" && (item.idleRetryCount || 0) < 2)
+      throw Object.assign(new Error("HTTP 503"), { retryable: true });
+    if (item.id === "2") throw new Error("HTTP 404");
+    await retryRepo.commit({ works: [{ id: item.id, complete: true,
+      files: [], sources: [item.scope], lastTask: item.taskId }] });
+  }, { lock: mutex() });
+  const done = engine.start("liked");
+  await waitFor(() => engine.task.sourceDone && engine.idleRetries.size === 1);
+  assert.ok(engine.busy, "a cooling candidate keeps the completed scan active");
+  await done;
+  assert.deepEqual(calls, ["1", "2", "3", "1", "1"]);
+  assert.equal(engine.task.run.checked, 3);
+  assert.equal(engine.task.run.saved, 2);
+  assert.equal(engine.task.run.failed, 1);
+  assert.equal(engine.task.status, "partial");
+}
+{
+  const rateRepo = await Repository.open(memoryFS().target);
+  let calls = 0;
+  const engine = new Engine(rateRepo, fakeSources(1), async () => {
+    calls++;
+    throw Object.assign(new Error("HTTP 429"), {
       mediaFailure: true,
       retryUntil: Date.now() + 60_000,
     });
-    // The 403 becomes eligible while the final fresh download is still active.
-    if (item.id === "6") await sleep(1150);
-    await failureRepo.commit({ works: [{ id: item.id, complete: true,
-      files: [], sources: [item.scope], lastTask: item.taskId }] });
-  }, { lock: mutex(), capacity: 4 });
-  await engine.start("liked");
-  assert.deepEqual(calls.sort(), ["1","2","3","4","5","6"]);
-  assert.equal(source.pages, 1);
-  assert.equal(engine.task.run.checked, 6);
-  assert.equal(engine.task.run.saved, 4);
-  assert.equal(engine.task.run.failed, 2);
-  assert.equal(engine.task.status, "partial");
+  }, { lock: mutex() });
+  engine.start("liked");
+  await waitFor(() => engine.task.sourceDone && engine.idleRetries.size === 1);
+  await engine.pause();
+  assert.equal(calls, 1, "rate-limit cooldown is respected and can be paused");
+  assert.equal(engine.task.status, "paused");
+  assert.equal(engine.idleRetries.size, 0);
 }
 {
   const fs = memoryFS();
@@ -1048,7 +1063,7 @@ console.log(
   assert.equal(engine.task.run.checked, 3);
   assert.ok(engine.counts.pending > 0);
 }
-console.log("OK: failed media and 429 release slots without a tail sweep; pause persists by journal without compaction");
+console.log("OK: cooling queue survives end of discovery, 429 wait is pausable, and pause persists without compaction");
 
 // Retry can fill idle slots repeatedly while discovery is still in flight.
 // Fresh queued work runs first, and terminal failures never occupy retry slots.

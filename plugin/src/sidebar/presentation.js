@@ -1,5 +1,5 @@
 // Keep one task stage across the sidebar, home entry and floating control.
-export function taskStage(task, { running = false, active = new Map(), retry = null } = {}) {
+export function taskStage(task, { running = false, active = new Map(), retry = null, retryCandidates = 0 } = {}) {
   if (!running) return ({paused:'已暂停',completed:'本轮完成',partial:'本轮结束',starting:'正在准备',pausing:'正在暂停'})[task?.status] || '已暂停';
   if (task?.status === 'pausing') return '正在暂停';
   if (task?.status === 'starting') return '正在准备';
@@ -9,6 +9,7 @@ export function taskStage(task, { running = false, active = new Map(), retry = n
   if ([...active.values()].some(i => i.loaded > 0)) return '下载中';
   if (retry) return '等待限流解除';
   if (active.size) return '准备下载';
+  if (task?.sourceDone && retryCandidates) return '等待重试';
   return task?.sourceDone ? '正在收尾' : '检查已有作品';
 }
 export function taskProblem(task, message = '') {
